@@ -285,6 +285,10 @@ body {
 .heatmap-tile[data-pnl="down"] {
   background: color-mix(in srgb, var(--trend-down) 20%, var(--bg-sunk));
 }
+.heatmap-tile[data-tradable="false"] {
+  outline: 2px solid var(--yellow);
+  outline-offset: -2px;
+}
 
 .heatmap-ticker {
   font-weight: 600;

@@ -11,7 +11,7 @@ Run it from the 6_mcp directory so it shares the engine's accounts.db:
 
 from fastapi import FastAPI
 
-from backend import market
+from backend import alpaca_broker, market
 from backend.accounts import Account
 from backend.database import read_log
 from backend.trading_floor import TRADER_NAME, MODEL_NAME
@@ -38,11 +38,18 @@ def average_cost(account: Account, symbol: str) -> float:
 
 
 def holdings_detail(account: Account) -> list[dict]:
-    """Current holdings enriched with price, market value and unrealised profit."""
+    """Current holdings enriched with price, market value, unrealised profit,
+    and real Alpaca asset metadata (exchange, asset class, tradability)."""
     details = []
     for symbol, quantity in account.holdings.items():
         price = market.get_share_price(symbol)
         cost = average_cost(account, symbol)
+        try:
+            asset = alpaca_broker.get_asset_info(symbol)
+        except Exception:
+            # Missing Alpaca creds, a rate limit, or a network hiccup shouldn't
+            # take down the whole read-only dashboard — just omit the fields.
+            asset = {}
         details.append(
             {
                 "symbol": symbol,
@@ -51,6 +58,11 @@ def holdings_detail(account: Account) -> list[dict]:
                 "avg_cost": cost,
                 "market_value": price * quantity,
                 "unrealized_pnl": (price - cost) * quantity,
+                "exchange": asset.get("exchange"),
+                "asset_class": asset.get("asset_class"),
+                "tradable": asset.get("tradable"),
+                "fractionable": asset.get("fractionable"),
+                "shortable": asset.get("shortable"),
             }
         )
     return details

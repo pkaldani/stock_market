@@ -73,8 +73,14 @@ defined in `mcp_servers.py`:
   price-lookup server.
 - **Researcher MCP servers**: wrapped as a single `Researcher` sub-agent tool (not exposed directly),
   giving it Fetch, Tavily search, a knowledge-graph memory server (`mcp-memory-libsql`, persisted at
-  `6_mcp/memory/<name>.db`), and a filtered subset of the technical analysis tools from
-  `backend/market.py`.
+  `6_mcp/memory/<name>.db`), a filtered subset of the technical analysis tools from `backend/market.py`,
+  and `backend/asset_server.py`'s `get_asset_info` tool — real Alpaca asset metadata (exchange, asset
+  class, status, tradable/fractionable/shortable) via `alpaca_broker.get_asset_info()`, so the
+  researcher can sanity-check a candidate is an active, tradable US equity before advising on it.
+  `get_asset_info` results are cached per symbol in-process since this metadata is effectively static;
+  `backend/api.py`'s `/api/trader` endpoint reuses the same cached lookup to enrich each holding for
+  the frontend, swallowing lookup failures (missing Alpaca creds, rate limits) so the read-only
+  dashboard stays up even if that enrichment fails.
 
 Instructions live in `backend/templates.py`'s `trader_instructions()` (no-arg — there's only one
 trader): a Buffett-style decision mandate with a moat/quality gate, DCF-based valuation and margin-of-

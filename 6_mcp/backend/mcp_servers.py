@@ -26,10 +26,12 @@ def trader_mcp_servers() -> list[MCPServerStdio]:
 
 
 market_analysis_params = {"command": "uv", "args": ["run", "-m", "backend.market"], "cwd": PROJECT_DIR}
+asset_params = {"command": "uv", "args": ["run", "-m", "backend.asset_server"], "cwd": PROJECT_DIR}
 
 
 def researcher_mcp_servers(name: str) -> list[MCPServerStdio]:
-    """The researcher's MCP servers: Fetch, Tavily web search, Memory, and technical analysis."""
+    """The researcher's MCP servers: Fetch, Tavily web search, Memory, technical
+    analysis, and real Alpaca asset metadata."""
     fetch = MCPServerStdio(
         # mcp-server-fetch's latest release imports the old `McpError` name, which the
         # `mcp` SDK renamed to `MCPError` — pin below that rename so `uvx` doesn't
@@ -63,4 +65,5 @@ def researcher_mcp_servers(name: str) -> list[MCPServerStdio]:
             ]
         ),
     )
-    return [fetch, search, memory, analysis]
+    assets = MCPServerStdio(asset_params, client_session_timeout_seconds=TIMEOUT)
+    return [fetch, search, memory, analysis, assets]

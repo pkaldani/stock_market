@@ -42,6 +42,8 @@ export class Heatmap {
       }
       tile.style.flexGrow = String(Math.max(0.05, share));
       tile.dataset.pnl = h.unrealized_pnl >= 0 ? "up" : "down";
+      tile.dataset.tradable = h.tradable === false ? "false" : "true";
+      tile.title = assetTooltip(h);
       tile.querySelector(".heatmap-value")!.textContent = formatMoney(h.market_value);
 
       const dir = priceDirections[h.symbol];
@@ -66,6 +68,15 @@ function flash(tile: HTMLElement, dir: "up" | "down"): void {
   void tile.offsetWidth;
   tile.classList.add(dir === "up" ? "flash-up" : "flash-down");
   setTimeout(() => tile.classList.remove("flash-up", "flash-down"), FLASH_MS);
+}
+
+function assetTooltip(h: Holding): string {
+  const parts = [h.symbol];
+  if (h.exchange) parts.push(h.exchange);
+  if (h.asset_class) parts.push(h.asset_class);
+  if (h.fractionable) parts.push("fractionable");
+  if (h.tradable === false) parts.push("NOT TRADABLE");
+  return parts.join(" · ");
 }
 
 function formatMoney(n: number): string {

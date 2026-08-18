@@ -8,6 +8,14 @@ export interface Holding {
   avg_cost: number;
   market_value: number;
   unrealized_pnl: number;
+  // Real Alpaca asset metadata; null when unavailable (e.g. Alpaca creds
+  // missing or the lookup failed) rather than absent, so callers can tell
+  // "unknown" from "not held".
+  exchange: string | null;
+  asset_class: string | null;
+  tradable: boolean | null;
+  fractionable: boolean | null;
+  shortable: boolean | null;
 }
 
 export interface Transaction {

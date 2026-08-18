@@ -80,6 +80,28 @@ def get_account_info() -> dict:
     }
 
 
+_asset_cache: dict[str, dict] = {}
+
+
+def get_asset_info(symbol: str) -> dict:
+    """Real Alpaca asset metadata for a symbol: exchange, asset class, and
+    tradability flags. Cached per symbol for the life of the process — unlike
+    price/quote data, this is effectively static."""
+    if symbol not in _asset_cache:
+        asset = trading_client().get_asset(symbol)
+        _asset_cache[symbol] = {
+            "symbol": asset.symbol,
+            "name": asset.name,
+            "exchange": str(asset.exchange),
+            "asset_class": str(asset.asset_class),
+            "status": str(asset.status),
+            "tradable": asset.tradable,
+            "fractionable": asset.fractionable,
+            "shortable": asset.shortable,
+        }
+    return _asset_cache[symbol]
+
+
 def get_real_positions() -> dict[str, int]:
     """Actual positions currently held in the real Alpaca account, aggregated
     across all symbols. Used as a sanity check against the sum of all
