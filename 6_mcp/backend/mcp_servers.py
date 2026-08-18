@@ -31,7 +31,10 @@ market_analysis_params = {"command": "uv", "args": ["run", "-m", "backend.market
 def researcher_mcp_servers(name: str) -> list[MCPServerStdio]:
     """The researcher's MCP servers: Fetch, Tavily web search, Memory, and technical analysis."""
     fetch = MCPServerStdio(
-        {"command": "uvx", "args": ["mcp-server-fetch"]},
+        # mcp-server-fetch's latest release imports the old `McpError` name, which the
+        # `mcp` SDK renamed to `MCPError` — pin below that rename so `uvx` doesn't
+        # resolve an incompatible combination.
+        {"command": "uvx", "args": ["--with", "mcp<1.28", "mcp-server-fetch"]},
         client_session_timeout_seconds=TIMEOUT,
     )
     search = MCPServerStdio(

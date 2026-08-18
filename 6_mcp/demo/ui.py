@@ -1,7 +1,7 @@
 import gradio as gr
 from demo.util import Color
 import pandas as pd
-from backend.trading_floor import names, lastnames, short_model_names
+from backend.trading_floor import TRADER_NAME, MODEL_NAME
 import plotly.express as px
 from backend.accounts import Account
 from backend.database import read_log
@@ -17,17 +17,16 @@ mapper = {
 
 
 class Trader:
-    def __init__(self, name: str, lastname: str, model_name: str):
+    def __init__(self, name: str, model_name: str):
         self.name = name
-        self.lastname = lastname
         self.model_name = model_name
-        self.account = Account.get(name)
+        self.account = Account.get()
 
     def reload(self):
-        self.account = Account.get(self.name)
+        self.account = Account.get()
 
     def get_title(self) -> str:
-        return f"<div style='text-align: center;font-size:34px;'>{self.name}<span style='color:#ccc;font-size:24px;'> ({self.model_name}) - {self.lastname}</span></div>"
+        return f"<div style='text-align: center;font-size:34px;'>{self.name}<span style='color:#ccc;font-size:24px;'> ({self.model_name})</span></div>"
 
     def get_strategy(self) -> str:
         return self.account.get_strategy()
@@ -169,10 +168,7 @@ class TraderView:
 def create_ui():
     """Create the main Gradio UI for the trading simulation"""
 
-    traders = [
-        Trader(trader_name, lastname, model_name)
-        for trader_name, lastname, model_name in zip(names, lastnames, short_model_names)
-    ]
+    traders = [Trader(TRADER_NAME, MODEL_NAME)]
     trader_views = [TraderView(trader) for trader in traders]
 
     with gr.Blocks(title="Traders", fill_width=True) as ui:

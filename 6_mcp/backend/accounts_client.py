@@ -9,17 +9,17 @@ params = StdioServerParameters(
     cwd=str(Path(__file__).resolve().parent.parent),
     env=None,
 )
-            
-async def read_accounts_resource(name):
+
+async def read_accounts_resource():
     async with stdio_client(params) as streams:
         async with mcp.ClientSession(*streams) as session:
             await session.initialize()
-            result = await session.read_resource(f"accounts://accounts_server/{name}")
+            result = await session.read_resource("accounts://accounts_server")
             return result.contents[0].text
-        
-async def read_strategy_resource(name):
+
+async def read_strategy_resource():
     async with stdio_client(params) as streams:
         async with mcp.ClientSession(*streams) as session:
             await session.initialize()
-            result = await session.read_resource(f"accounts://strategy/{name}")
+            result = await session.read_resource("accounts://strategy")
             return result.contents[0].text

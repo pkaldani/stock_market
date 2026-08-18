@@ -20,7 +20,7 @@ export class TraderPanel {
 
   constructor(state: TraderState) {
     this.state = state;
-    const { name, model_name, lastname } = state.info;
+    const { name, model_name } = state.detail;
     this.root = document.createElement("section");
     this.root.className = "panel";
     this.root.innerHTML = `
@@ -45,7 +45,7 @@ export class TraderPanel {
       </div>
     `;
     this.root.querySelector(".panel-name")!.textContent = name;
-    this.root.querySelector(".panel-sub")!.textContent = `${model_name} · ${lastname}`;
+    this.root.querySelector(".panel-sub")!.textContent = model_name;
     this.valueEl = this.root.querySelector(".panel-value")!;
     this.pnlEl = this.root.querySelector(".panel-pnl")!;
     this.strategyEl = this.root.querySelector(".panel-strategy")!;
@@ -63,30 +63,23 @@ export class TraderPanel {
 
   update(): void {
     const detail = this.state.detail;
-    if (detail) {
-      const trend = detail.pnl >= 0 ? "up" : "down";
-      this.valueEl.textContent = formatMoney(detail.portfolio_value);
-      this.valueEl.dataset.trend = trend;
-      this.pnlEl.dataset.trend = trend;
-      this.pnlEl.textContent = formatPnl(detail.pnl);
-      this.heatmap.render(detail.holdings, this.state.priceDirections());
-      this.state.rememberPrices();
-      const strategy = detail.strategy.trim();
-      this.strategyEl.textContent = strategy || "No strategy set yet";
-      this.strategyEl.title = strategy;
-      this.strategyEl.classList.toggle("empty", !strategy);
-      this.transactions.render(detail.transactions);
-    }
+    const trend = detail.pnl >= 0 ? "up" : "down";
+    this.valueEl.textContent = formatMoney(detail.portfolio_value);
+    this.valueEl.dataset.trend = trend;
+    this.pnlEl.dataset.trend = trend;
+    this.pnlEl.textContent = formatPnl(detail.pnl);
+    this.heatmap.render(detail.holdings, this.state.priceDirections());
+    this.state.rememberPrices();
+    const strategy = detail.strategy.trim();
+    this.strategyEl.textContent = strategy || "No strategy set yet";
+    this.strategyEl.title = strategy;
+    this.strategyEl.classList.toggle("empty", !strategy);
+    this.transactions.render(detail.transactions);
     this.chart?.update(this.state.chart);
   }
 
   renderLogs(rows: LogRow[]): void {
     this.log.render(rows);
-  }
-
-  setLeader(isLeader: boolean): void {
-    if (isLeader) this.root.dataset.leader = "true";
-    else delete this.root.dataset.leader;
   }
 }
 

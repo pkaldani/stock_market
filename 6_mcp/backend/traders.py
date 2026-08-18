@@ -64,9 +64,8 @@ async def get_researcher_tool(mcp_servers, model_name) -> Tool:
 
 
 class Trader:
-    def __init__(self, name: str, lastname="Trader", model_name="gpt-5.4-mini"):
+    def __init__(self, name: str, model_name="gpt-5.4-mini"):
         self.name = name
-        self.lastname = lastname
         self.agent = None
         self.model_name = model_name
         self.do_trade = True
@@ -75,7 +74,7 @@ class Trader:
         tool = await get_researcher_tool(researcher_mcp_servers, self.model_name)
         self.agent = Agent(
             name=self.name,
-            instructions=trader_instructions(self.name),
+            instructions=trader_instructions(),
             model=get_model(self.model_name),
             tools=[tool],
             mcp_servers=trader_mcp_servers,
@@ -83,7 +82,7 @@ class Trader:
         return self.agent
 
     async def get_account_report(self) -> str:
-        account = await read_accounts_resource(self.name)
+        account = await read_accounts_resource()
         account_json = json.loads(account)
         account_json.pop("portfolio_value_time_series", None)
         return json.dumps(account_json)
@@ -91,11 +90,11 @@ class Trader:
     async def run_agent(self, trader_mcp_servers, researcher_mcp_servers):
         self.agent = await self.create_agent(trader_mcp_servers, researcher_mcp_servers)
         account = await self.get_account_report()
-        strategy = await read_strategy_resource(self.name)
+        strategy = await read_strategy_resource()
         message = (
-            trade_message(self.name, strategy, account)
+            trade_message(strategy, account)
             if self.do_trade
-            else rebalance_message(self.name, strategy, account)
+            else rebalance_message(strategy, account)
         )
         await Runner.run(self.agent, message, max_turns=MAX_TURNS)
 

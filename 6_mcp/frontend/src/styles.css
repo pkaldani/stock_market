@@ -131,44 +131,6 @@ body {
   color: var(--fg-muted);
 }
 
-.returns {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.returns-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--fg-dim);
-}
-.returns-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-.returns-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.returns-name {
-  font-size: 13px;
-  color: var(--fg);
-}
-.returns-pct {
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg-muted);
-}
-.returns-pct[data-trend="up"] { color: var(--trend-up); }
-.returns-pct[data-trend="down"] { color: var(--trend-down); }
-
 .sidebar-spacer { flex: 1; }
 
 .theme-toggle {
@@ -199,8 +161,8 @@ body {
 
 .panels {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
   gap: 12px;
   padding: 12px;
   min-height: 0;
@@ -217,12 +179,6 @@ body {
   min-height: 0;
   overflow: hidden;
   transition: border-color 200ms, box-shadow 200ms;
-}
-
-/* Live leader: the trader with the highest portfolio value right now. */
-.panel[data-leader="true"] {
-  border-color: var(--yellow);
-  box-shadow: 0 0 0 1px var(--yellow), 0 0 20px color-mix(in srgb, var(--yellow) 22%, transparent);
 }
 
 .panel-head {

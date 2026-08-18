@@ -1,12 +1,6 @@
 // Client for the trading floor HTTP API. All paths are relative; in dev the Vite
 // proxy forwards /api to the FastAPI backend, so the browser sees one origin.
 
-export interface TraderInfo {
-  name: string;
-  lastname: string;
-  model_name: string;
-}
-
 export interface Holding {
   symbol: string;
   quantity: number;
@@ -30,7 +24,9 @@ export interface TimePoint {
 }
 
 // Mirrors the full backend payload; the dashboard renders a subset of these fields.
-export interface TraderDetail extends TraderInfo {
+export interface TraderDetail {
+  name: string;
+  model_name: string;
   balance: number;
   strategy: string;
   portfolio_value: number;
@@ -58,16 +54,12 @@ async function get<T>(path: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-export function getTraders(): Promise<TraderInfo[]> {
-  return get("/api/traders");
+export function getTrader(): Promise<TraderDetail> {
+  return get("/api/trader");
 }
 
-export function getTrader(name: string): Promise<TraderDetail> {
-  return get(`/api/traders/${encodeURIComponent(name)}`);
-}
-
-export function getTraderLogs(name: string, lastN = 13): Promise<LogRow[]> {
-  return get(`/api/traders/${encodeURIComponent(name)}/logs?last_n=${lastN}`);
+export function getTraderLogs(lastN = 13): Promise<LogRow[]> {
+  return get(`/api/trader/logs?last_n=${lastN}`);
 }
 
 export function getMarket(): Promise<MarketInfo> {

@@ -46,34 +46,28 @@ print(alpaca_broker.get_latest_price("AAPL"))
 You should see your paper account's cash/buying power, whether the market is
 open right now, and a live AAPL quote.
 
-## 6. Important: one real account, four virtual traders
-Alpaca's personal Trading API gives you **one account** — there's no way to
-fetch "Warren's balance" vs "George's balance" from Alpaca itself, because
-Alpaca doesn't know your four traders exist. This code keeps that separation
-**locally**:
+## 6. Important: one real account, one virtual ledger
+Alpaca's personal Trading API gives you **one account**. This code keeps a
+local virtual ledger on top of it rather than trusting Alpaca's own
+cash/position numbers directly:
 
-- Each trader's `balance` and `holdings` are a virtual ledger in your existing
+- The trader's `balance` and `holdings` are a virtual ledger in your existing
   SQLite database — exactly like before.
-- Every buy/sell now places a **real market order** against your one Alpaca
-  paper account and books the real fill price into that trader's ledger.
+- Every buy/sell places a **real market order** against your Alpaca paper
+  account and books the real fill price into that ledger.
 - Before any sell, the code double-checks the real Alpaca account actually
-  still holds enough shares of that symbol — protecting against two traders
-  virtually believing they each own shares that, in reality, only exist once.
+  still holds enough shares of that symbol — a sanity check against the two
+  ledgers drifting apart (a fill that hasn't posted yet, a manual trade placed
+  outside this app, etc.), not a cross-trader race anymore now that there's
+  only one trader.
 
-Two things to set up yourself, since they're account-design decisions rather
-than code decisions:
+One thing to set up yourself, since it's an account-design decision rather
+than a code decision:
 
-- **Don't let total virtual balances exceed real buying power.** With
-  `INITIAL_BALANCE = 10_000` and 4 traders, that's $40,000 of virtual buying
-  power against your one account — fine against Alpaca's default $100k paper
-  balance, but you should lower `INITIAL_BALANCE` or fund the account
-  accordingly if you go live with real money later.
-- **Symbol overlap between traders is still possible even with the sell-side
-  check.** If Warren and George both hold virtual AAPL positions bought from
-  the same real pool, and Warren sells first, George's later sell of the same
-  symbol will correctly fail if there aren't enough real shares left — but
-  it's worth reviewing trade logs periodically (`GET /api/traders/{name}` in
-  `api.py`) to catch this rather than assuming it can't happen.
+- **Don't let the virtual balance exceed real buying power.** With
+  `INITIAL_BALANCE = 10_000`, that's comfortably within Alpaca's default
+  $100k paper balance, but you should raise `INITIAL_BALANCE` or fund the
+  account accordingly if you go live with real money later.
 
 ## 7. Going live later
 When you're ready:

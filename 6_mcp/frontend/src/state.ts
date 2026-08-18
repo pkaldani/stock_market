@@ -1,7 +1,7 @@
-// Per-trader client state. The chart is seeded once from the stored time series,
+// The single trader's client state. The chart is seeded once from the stored time series,
 // then grows a point on every poll so the line keeps moving while you watch.
 
-import type { Holding, TraderDetail, TraderInfo } from "./api";
+import type { Holding, TraderDetail } from "./api";
 
 export const CHART_MAX_POINTS = 5000;
 
@@ -16,22 +16,17 @@ function toUnixSeconds(stamp: string): number {
 }
 
 export class TraderState {
-  readonly info: TraderInfo;
-  detail: TraderDetail | null = null;
-  chart: ChartPoint[] = [];
+  detail: TraderDetail;
+  chart: ChartPoint[];
   previousPrices: Record<string, number> = {};
-  private seeded = false;
 
-  constructor(info: TraderInfo) {
-    this.info = info;
+  constructor(initial: TraderDetail) {
+    this.detail = initial;
+    this.chart = initial.time_series.map((p) => ({ t: toUnixSeconds(p.datetime), value: p.value }));
   }
 
   recordDetail(detail: TraderDetail): void {
     this.detail = detail;
-    if (!this.seeded) {
-      this.chart = detail.time_series.map((p) => ({ t: toUnixSeconds(p.datetime), value: p.value }));
-      this.seeded = true;
-    }
     this.chart.push({ t: Date.now() / 1000, value: detail.portfolio_value });
     if (this.chart.length > CHART_MAX_POINTS) {
       this.chart.splice(0, this.chart.length - CHART_MAX_POINTS);
@@ -40,7 +35,6 @@ export class TraderState {
 
   priceDirections(): Record<string, "up" | "down" | "same"> {
     const out: Record<string, "up" | "down" | "same"> = {};
-    if (!this.detail) return out;
     for (const h of this.detail.holdings) {
       const prev = this.previousPrices[h.symbol];
       out[h.symbol] =
@@ -50,7 +44,6 @@ export class TraderState {
   }
 
   rememberPrices(): void {
-    if (!this.detail) return;
     this.previousPrices = Object.fromEntries(this.detail.holdings.map((h: Holding) => [h.symbol, h.price]));
   }
 }
