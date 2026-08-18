@@ -13,10 +13,6 @@ load_dotenv(override=True)
 # no human "name" field to pull one from).
 TRADER_NAME = "pkaldani"
 
-# Starting virtual cash for the trader, tracked against the one real Alpaca
-# account's actual cash/buying power. Should be <= the real account's cash.
-INITIAL_BALANCE = 10_000.0
-
 # Minimum time that must pass between transactions on the same symbol, in
 # either direction, before another buy/sell of it is allowed. This is the
 # day-trading guardrail: it blocks opening and closing (or re-opening) a
@@ -32,6 +28,10 @@ class Transaction(BaseModel):
     rationale: str
     order_id: str = ""
     order_status: str = ""
+    # "agent" (the LLM trader, via its MCP tools) or "manual" (placed by a
+    # human through the dashboard's trade page). Defaults to "agent" so
+    # existing rows written before this field existed still validate.
+    source: str = "agent"
 
     def total(self) -> float:
         return self.quantity * self.price
@@ -41,12 +41,26 @@ class Transaction(BaseModel):
 
 
 class Account(BaseModel):
+    """There's exactly one real Alpaca account behind this trader, so
+    balance/holdings/portfolio value/P&L are not tracked separately here —
+    they're live reads of that account (via alpaca_broker), always fresh at
+    the point of use. What IS stored locally is this app's own state: the
+    evolvable strategy text and its own log of the orders it placed (for
+    rationale/history — Alpaca's positions may also include activity from
+    outside this app, e.g. manual trades)."""
+
     name: str
-    balance: float
     strategy: str
-    holdings: dict[str, int]
     transactions: list[Transaction]
     portfolio_value_time_series: list[tuple[str, float]]
+
+    @property
+    def balance(self) -> float:
+        return alpaca_broker.get_account_info()["cash"]
+
+    @property
+    def holdings(self) -> dict[str, int]:
+        return alpaca_broker.get_real_positions()
 
     @classmethod
     def get(cls) -> "Account":
@@ -54,9 +68,7 @@ class Account(BaseModel):
         if not fields:
             fields = {
                 "name": TRADER_NAME,
-                "balance": INITIAL_BALANCE,
                 "strategy": "",
-                "holdings": {},
                 "transactions": [],
                 "portfolio_value_time_series": []
             }
@@ -67,38 +79,13 @@ class Account(BaseModel):
         write_account(TRADER_NAME, self.model_dump())
 
     def reset(self, strategy: str = ""):
-        self.balance = INITIAL_BALANCE
+        """Reset this app's own state (strategy text, its order history).
+        Does not touch the real Alpaca account — that money and those
+        positions are real and can't be reset."""
         self.strategy = strategy
-        self.holdings = {}
         self.transactions = []
         self.portfolio_value_time_series = []
         self.save()
-
-    def deposit(self, amount: float):
-        """ Deposit funds into the virtual ledger (does not move real money). """
-        if amount <= 0:
-            raise ValueError("Deposit amount must be positive.")
-        self.balance += amount
-        self.save()
-
-    def withdraw(self, amount: float):
-        """ Withdraw funds from the virtual ledger, ensuring it doesn't go negative. """
-        if amount > self.balance:
-            raise ValueError("Insufficient funds for withdrawal.")
-        self.balance -= amount
-        self.save()
-
-    # ------------------------------------------------------------------
-    # Sanity check: the virtual ledger and the real Alpaca account should
-    # agree, but they're updated independently (fills, manual trades placed
-    # outside this app, etc. can make them drift). Before selling, confirm
-    # the real account actually still holds at least this many shares
-    # rather than trusting the virtual ledger blindly.
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _real_position_is_sufficient(symbol: str, quantity: int) -> bool:
-        real_positions = alpaca_broker.get_real_positions()
-        return real_positions.get(symbol, 0) >= quantity
 
     def _last_transaction_time(self, symbol: str) -> datetime | None:
         """Timestamp of the most recent buy or sell of this symbol, if any."""
@@ -118,15 +105,11 @@ class Account(BaseModel):
                 f"{MIN_HOLD_HOURS} hours (eligible again at {eligible_at.strftime('%Y-%m-%d %H:%M:%S')})."
             )
 
-    def buy_shares(self, symbol: str, quantity: int, rationale: str) -> str:
-        """ Buy shares via a REAL Alpaca market order, tracked against this
-        trader's virtual cash ledger. """
+    def buy_shares(self, symbol: str, quantity: int, rationale: str, source: str = "agent") -> str:
+        """ Buy shares via a REAL Alpaca market order. """
         self._check_hold_period(symbol)
         price = alpaca_broker.get_latest_price(symbol)
         estimated_cost = price * quantity
-
-        if estimated_cost > self.balance:
-            raise ValueError("Insufficient virtual balance to buy shares.")
 
         account_info = alpaca_broker.get_account_info()
         if estimated_cost > account_info["buying_power"]:
@@ -145,31 +128,21 @@ class Account(BaseModel):
         if filled["filled_avg_price"]:
             fill_price = filled["filled_avg_price"]
 
-        total_cost = fill_price * quantity
-        self.holdings[symbol] = self.holdings.get(symbol, 0) + quantity
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         transaction = Transaction(
             symbol=symbol, quantity=quantity, price=fill_price, timestamp=timestamp,
-            rationale=rationale, order_id=order["id"], order_status=order["status"],
+            rationale=rationale, order_id=order["id"], order_status=order["status"], source=source,
         )
         self.transactions.append(transaction)
-        self.balance -= total_cost
         self.save()
-        write_log(self.name, "account", f"BUY {quantity} {symbol} (order {order['id']}, status={order['status']})")
+        write_log(self.name, "account", f"BUY {quantity} {symbol} (order {order['id']}, status={order['status']}, source={source})")
         return "Order submitted. Latest details:\n" + self.report()
 
-    def sell_shares(self, symbol: str, quantity: int, rationale: str) -> str:
-        """ Sell shares via a REAL Alpaca market order, tracked against this
-        trader's virtual holdings ledger. """
+    def sell_shares(self, symbol: str, quantity: int, rationale: str, source: str = "agent") -> str:
+        """ Sell shares via a REAL Alpaca market order. """
         self._check_hold_period(symbol)
         if self.holdings.get(symbol, 0) < quantity:
-            raise ValueError(f"Cannot sell {quantity} shares of {symbol}. Not enough virtual shares held.")
-
-        if not self._real_position_is_sufficient(symbol, quantity):
-            raise ValueError(
-                f"Real Alpaca account does not currently hold {quantity} shares of {symbol} "
-                f"(the virtual ledger and the real account have drifted apart)."
-            )
+            raise ValueError(f"Cannot sell {quantity} shares of {symbol}. Alpaca account does not hold enough shares.")
 
         price = alpaca_broker.get_latest_price(symbol)
         order = alpaca_broker.submit_market_order(symbol, quantity, "sell")
@@ -179,32 +152,23 @@ class Account(BaseModel):
         if filled["filled_avg_price"]:
             fill_price = filled["filled_avg_price"]
 
-        total_proceeds = fill_price * quantity
-        self.holdings[symbol] -= quantity
-        if self.holdings[symbol] == 0:
-            del self.holdings[symbol]
-
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         transaction = Transaction(
             symbol=symbol, quantity=-quantity, price=fill_price, timestamp=timestamp,
-            rationale=rationale, order_id=order["id"], order_status=order["status"],
+            rationale=rationale, order_id=order["id"], order_status=order["status"], source=source,
         )
         self.transactions.append(transaction)
-        self.balance += total_proceeds
         self.save()
-        write_log(self.name, "account", f"SELL {quantity} {symbol} (order {order['id']}, status={order['status']})")
+        write_log(self.name, "account", f"SELL {quantity} {symbol} (order {order['id']}, status={order['status']}, source={source})")
         return "Order submitted. Latest details:\n" + self.report()
 
-    def calculate_portfolio_value(self):
-        """ Virtual cash + current market value of this trader's virtual holdings. """
-        total_value = self.balance
-        for symbol, quantity in self.holdings.items():
-            total_value += alpaca_broker.get_latest_price(symbol) * quantity
-        return total_value
+    def calculate_portfolio_value(self) -> float:
+        """ The real Alpaca account's total portfolio value (cash + positions). """
+        return alpaca_broker.get_account_info()["portfolio_value"]
 
-    def calculate_profit_loss(self, portfolio_value: float):
-        initial_spend = sum(transaction.total() for transaction in self.transactions)
-        return portfolio_value - initial_spend - self.balance
+    def calculate_profit_loss(self) -> float:
+        """ Unrealized P&L summed across all real Alpaca positions, as Alpaca itself computes it. """
+        return sum(p["unrealized_pl"] for p in alpaca_broker.get_real_positions_detail())
 
     def get_holdings(self):
         return self.holdings
@@ -217,8 +181,10 @@ class Account(BaseModel):
         portfolio_value = self.calculate_portfolio_value()
         self.portfolio_value_time_series.append((datetime.now().strftime("%Y-%m-%d %H:%M:%S"), portfolio_value))
         self.save()
-        pnl = self.calculate_profit_loss(portfolio_value)
+        pnl = self.calculate_profit_loss()
         data = self.model_dump()
+        data["balance"] = self.balance
+        data["holdings"] = self.holdings
         data["total_portfolio_value"] = portfolio_value
         data["total_profit_loss"] = pnl
         write_log(self.name, "account", "Retrieved account details")

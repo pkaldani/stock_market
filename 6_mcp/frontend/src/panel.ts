@@ -17,6 +17,7 @@ export class TraderPanel {
   private valueEl: HTMLElement;
   private pnlEl: HTMLElement;
   private strategyEl: HTMLElement;
+  private realAccountEl: HTMLElement;
 
   constructor(state: TraderState) {
     this.state = state;
@@ -30,6 +31,7 @@ export class TraderPanel {
         <span class="panel-value" data-trend="flat">$0</span>
         <span class="panel-pnl"></span>
         <span class="panel-strategy"></span>
+        <span class="panel-real-account"></span>
       </header>
       <div class="panel-chart"></div>
       <div class="panel-heatmap"></div>
@@ -49,6 +51,7 @@ export class TraderPanel {
     this.valueEl = this.root.querySelector(".panel-value")!;
     this.pnlEl = this.root.querySelector(".panel-pnl")!;
     this.strategyEl = this.root.querySelector(".panel-strategy")!;
+    this.realAccountEl = this.root.querySelector(".panel-real-account")!;
     this.heatmap = new Heatmap(this.root.querySelector(".panel-heatmap")!);
     this.log = new LogView(this.root.querySelector(".panel-log")!);
     this.transactions = new TransactionsView(this.root.querySelector(".panel-transactions")!);
@@ -63,17 +66,22 @@ export class TraderPanel {
 
   update(): void {
     const detail = this.state.detail;
-    const trend = detail.pnl >= 0 ? "up" : "down";
-    this.valueEl.textContent = formatMoney(detail.portfolio_value);
-    this.valueEl.dataset.trend = trend;
+    const trend = detail.pnl !== null && detail.pnl >= 0 ? "up" : "down";
+    this.valueEl.textContent = detail.portfolio_value !== null ? formatMoney(detail.portfolio_value) : "Unavailable";
+    this.valueEl.dataset.trend = detail.portfolio_value !== null ? trend : "flat";
     this.pnlEl.dataset.trend = trend;
-    this.pnlEl.textContent = formatPnl(detail.pnl);
+    this.pnlEl.textContent = detail.pnl !== null ? formatPnl(detail.pnl) : "";
     this.heatmap.render(detail.holdings, this.state.priceDirections());
     this.state.rememberPrices();
     const strategy = detail.strategy.trim();
     this.strategyEl.textContent = strategy || "No strategy set yet";
     this.strategyEl.title = strategy;
     this.strategyEl.classList.toggle("empty", !strategy);
+    const real = detail.real_account;
+    this.realAccountEl.textContent = real
+      ? `Alpaca buying power: ${formatMoney(real.buying_power)}`
+      : "Alpaca account unavailable";
+    this.realAccountEl.classList.toggle("empty", !real);
     this.transactions.render(detail.transactions);
     this.chart?.update(this.state.chart);
   }

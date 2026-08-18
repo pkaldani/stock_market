@@ -40,12 +40,21 @@ CMD ["uv", "run", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "
 # ---------------------------------------------------------------------------
 # engine: the trading loop (backend/trading_floor.py). Its researcher sub-agent
 # spawns MCP servers over npx/uvx, so this target needs Node.js on top of uv.
+#
+# Copied from the official Node image rather than `apt-get install nodejs` —
+# Debian bookworm's apt repo only has Node 18, which is missing the global
+# `CustomEvent` some MCP server packages (e.g. mcp-memory-libsql) expect at
+# runtime, crashing them with "ReferenceError: CustomEvent is not defined".
+# Both images are bookworm-based so the copied binary is glibc-compatible.
 # ---------------------------------------------------------------------------
+FROM node:22-slim AS node-runtime
+
 FROM base AS engine
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 CMD ["uv", "run", "-m", "backend.trading_floor"]
 

@@ -7,10 +7,9 @@ Alpaca's personal Trading API does not expose multiple named sub-accounts;
 that only exists in Alpaca's separate Broker API product for platforms
 managing many end-customers.
 
-Because there is only one real account, per-trader (Warren/George/Ray/Cathie)
-balances and holdings continue to be tracked as VIRTUAL LEDGERS in the local
-database (see accounts.py), while actual order execution, fills, and cash
-all flow through this one Alpaca account.
+There is exactly one trader and no virtual ledger: `Account.balance`/
+`Account.holdings` (accounts.py) are live reads of this one real account's
+cash and positions, not a separately tracked local copy.
 
 Setup:
     pip install alpaca-py
@@ -21,6 +20,7 @@ Docs:
 """
 
 import os
+import time
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
@@ -104,16 +104,178 @@ def get_asset_info(symbol: str) -> dict:
 
 def get_real_positions() -> dict[str, int]:
     """Actual positions currently held in the real Alpaca account, aggregated
-    across all symbols. Used as a sanity check against the sum of all
-    traders' virtual holdings for the same symbol."""
+    across all symbols. This IS the trader's holdings — there is no separate
+    virtual ledger of positions anymore."""
     positions = trading_client().get_all_positions()
     return {p.symbol: int(float(p.qty)) for p in positions}
+
+
+def get_real_positions_detail() -> list[dict]:
+    """Real Alpaca positions with quantity, cost basis, current price, and
+    unrealized P&L as reported directly by Alpaca (not recomputed locally
+    from a transaction log, which wouldn't know about positions opened
+    outside this app)."""
+    positions = trading_client().get_all_positions()
+    return [
+        {
+            "symbol": p.symbol,
+            "quantity": int(float(p.qty)),
+            "avg_entry_price": float(p.avg_entry_price),
+            "current_price": float(p.current_price) if p.current_price else None,
+            "market_value": float(p.market_value) if p.market_value else 0.0,
+            "unrealized_pl": float(p.unrealized_pl) if p.unrealized_pl else 0.0,
+        }
+        for p in positions
+    ]
+
+
+# Unlike `_asset_cache` above (static metadata, cached forever), account
+# balance/positions change with every fill, so this cache is time-based: a
+# few minutes old is fine for a dashboard display, and it keeps the read-only
+# API from hitting Alpaca on every ~6s frontend poll.
+_ACCOUNT_SNAPSHOT_TTL_SECONDS = 300
+_account_snapshot_cache: dict = {}
+
+
+def get_real_account_snapshot(cache_key: int | None = None) -> dict:
+    """Real Alpaca account info plus detailed positions, cached for a few
+    minutes. Meant for read-only display (the dashboard), not for the order
+    safety checks or live balance/holdings in accounts.py, which call
+    get_account_info()/get_real_positions() directly so they always see
+    fresh state before placing an order.
+
+    `cache_key` is an opaque marker — api.py passes the local transaction
+    count from accounts.db — that busts the cache early if it differs from
+    what was true when the cache was last filled. A plain TTL alone can't
+    tell when a trade happened: buy_shares/sell_shares run in whichever
+    process placed the order (the trading_floor engine for the LLM trader,
+    this api.py process for a manual trade), so an in-process "clear the
+    cache now" call only ever helps the manual case. The transaction count
+    is read from the one thing every process already shares — accounts.db —
+    so this catches both.
+    """
+    now = time.monotonic()
+    cached = _account_snapshot_cache.get("data")
+    cached_at = _account_snapshot_cache.get("at", 0.0)
+    cached_key = _account_snapshot_cache.get("key")
+    fresh_enough = cached is not None and now - cached_at < _ACCOUNT_SNAPSHOT_TTL_SECONDS
+    same_key = cache_key is None or cache_key == cached_key
+    if fresh_enough and same_key:
+        return cached
+
+    snapshot = {**get_account_info(), "positions": get_real_positions_detail()}
+    _account_snapshot_cache["data"] = snapshot
+    _account_snapshot_cache["at"] = now
+    _account_snapshot_cache["key"] = cache_key
+    return snapshot
+
+
+def get_fill_activities() -> list[dict]:
+    """Every real order fill on this account, oldest first, for its entire
+    history — not just orders placed by this app (the account may have prior
+    manual activity). alpaca-py has no dedicated wrapper for the account
+    activities endpoint, so this calls it directly via the base client and
+    paginates through Alpaca's 100-per-page limit via `page_token`."""
+    client = trading_client()
+    activities: list[dict] = []
+    page_token = None
+    while True:
+        params = {"direction": "asc", "page_size": 100}
+        if page_token:
+            params["page_token"] = page_token
+        batch = client.get("/account/activities/FILL", params)
+        if not batch:
+            break
+        activities.extend(batch)
+        if len(batch) < 100:
+            break
+        page_token = batch[-1]["id"]
+    return [
+        {
+            "id": a["id"],
+            "symbol": a["symbol"],
+            "side": a["side"],
+            "qty": float(a["qty"]),
+            "price": float(a["price"]),
+            "transaction_time": a["transaction_time"],
+            "order_id": a["order_id"],
+        }
+        for a in activities
+    ]
+
+
+# Same rationale as _ACCOUNT_SNAPSHOT_TTL_SECONDS: this walks the account's
+# entire fill history on every call, so it's cached rather than recomputed
+# on every dashboard poll.
+_REALIZED_PNL_TTL_SECONDS = 300
+_realized_pnl_cache: dict = {}
+
+
+def get_realized_pnl() -> dict:
+    """Realized P&L via FIFO cost-basis matching over the real account's full
+    fill history: each buy opens a cost-basis lot, each sell consumes the
+    oldest open lot(s) first. Returns individual closed trades (for a
+    trade-by-trade ledger) plus per-symbol and total rollups.
+
+    A sell that has no matching open lot (e.g. a short, or a position opened
+    before the earliest fill Alpaca reports) has no cost basis to compute
+    against and is left out rather than guessed at.
+    """
+    now = time.monotonic()
+    cached = _realized_pnl_cache.get("data")
+    cached_at = _realized_pnl_cache.get("at", 0.0)
+    if cached is not None and now - cached_at < _REALIZED_PNL_TTL_SECONDS:
+        return cached
+
+    open_lots: dict[str, list[list]] = {}  # symbol -> [[qty, price, time], ...], oldest first
+    closed_trades: list[dict] = []
+    for fill in get_fill_activities():
+        symbol, side, qty, price = fill["symbol"], fill["side"], fill["qty"], fill["price"]
+        lots = open_lots.setdefault(symbol, [])
+        if side == "buy":
+            lots.append([qty, price, fill["transaction_time"]])
+            continue
+
+        remaining = qty
+        while remaining > 1e-9 and lots:
+            lot_qty, lot_price, lot_time = lots[0]
+            matched = min(lot_qty, remaining)
+            closed_trades.append({
+                "symbol": symbol,
+                "quantity": matched,
+                "buy_price": lot_price,
+                "sell_price": price,
+                "buy_time": lot_time,
+                "sell_time": fill["transaction_time"],
+                "realized_pnl": (price - lot_price) * matched,
+            })
+            remaining -= matched
+            if lot_qty - matched <= 1e-9:
+                lots.pop(0)
+            else:
+                lots[0][0] = lot_qty - matched
+
+    by_symbol: dict[str, float] = {}
+    for trade in closed_trades:
+        by_symbol[trade["symbol"]] = by_symbol.get(trade["symbol"], 0.0) + trade["realized_pnl"]
+
+    result = {
+        "closed_trades": closed_trades,
+        "by_symbol": by_symbol,
+        "total": sum(by_symbol.values()),
+    }
+    _realized_pnl_cache["data"] = result
+    _realized_pnl_cache["at"] = now
+    return result
 
 
 def get_latest_price(symbol: str) -> float:
     """Midpoint of the latest real bid/ask for a symbol."""
     request = StockLatestQuoteRequest(symbol_or_symbols=symbol)
-    quote = data_client().get_stock_latest_quote(request)[symbol]
+    quotes = data_client().get_stock_latest_quote(request)
+    if symbol not in quotes:
+        raise ValueError(f"No live quote available for '{symbol}' — check it's a valid, tradable symbol.")
+    quote = quotes[symbol]
     bid, ask = quote.bid_price, quote.ask_price
     if bid and ask:
         return round((bid + ask) / 2, 4)

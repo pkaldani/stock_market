@@ -74,7 +74,7 @@ class Trader:
     def get_portfolio_value(self) -> str:
         """Calculate total portfolio value based on current prices"""
         portfolio_value = self.account.calculate_portfolio_value() or 0.0
-        pnl = self.account.calculate_profit_loss(portfolio_value) or 0.0
+        pnl = self.account.calculate_profit_loss() or 0.0
         color = "green" if pnl >= 0 else "red"
         sign = "+" if pnl >= 0 else "-"
         return f"<div style='text-align: center;background-color:{color};'><span style='font-size:32px'>${portfolio_value:,.0f}</span><span style='font-size:24px'>&nbsp;&nbsp;&nbsp;{sign}${abs(pnl):,.0f}</span></div>"

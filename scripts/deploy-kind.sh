@@ -110,11 +110,19 @@ SECRET_NAME="${RELEASE}-secrets"
 if [[ "$SKIP_SECRET" == false ]]; then
   if [[ -f "$ENV_FILE" ]]; then
     log "creating/updating Secret ${SECRET_NAME} from ${ENV_FILE}"
+    # Only set keys that are actually non-empty in the env file. traders.py passes
+    # e.g. os.getenv("OPENROUTER_API_KEY") straight into AsyncOpenAI(api_key=...),
+    # and the openai SDK only falls back to OPENAI_API_KEY when that's None — an
+    # empty-but-present env var (which is what an empty --from-literal produces)
+    # breaks that fallback and crashes every client construction at import time.
     literal_args=()
     for key in "${SECRET_KEYS[@]}"; do
       value="$(grep -E "^${key}=" "$ENV_FILE" | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")" || true
-      literal_args+=(--from-literal="${key}=${value}")
+      if [[ -n "$value" ]]; then
+        literal_args+=(--from-literal="${key}=${value}")
+      fi
     done
+    [[ ${#literal_args[@]} -gt 0 ]] || die "no non-empty keys found in ${ENV_FILE} among: ${SECRET_KEYS[*]}"
     kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
       "${literal_args[@]}" --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f -
   else
@@ -149,6 +157,17 @@ log "deploying release '${RELEASE}' to namespace '${NAMESPACE}' on context '${KU
 helm "${helm_args[@]}"
 
 if [[ "$DRY_RUN" == false ]]; then
+  # With --pullPolicy Never, an unchanged tag string never triggers a rollout on
+  # its own — but a rebuild against a dirty (uncommitted) tree reuses the same
+  # tag while `kind load` overwrites its content on the node. Force a restart
+  # so already-running pods actually pick up what was just built, every time.
+  log "restarting workloads so they pick up the freshly loaded image content"
+  for dep in "${RELEASE}-app" "${RELEASE}-frontend"; do
+    if kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get deployment "$dep" >/dev/null 2>&1; then
+      kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" rollout restart "deployment/${dep}"
+    fi
+  done
+  kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" rollout status "deployment/${RELEASE}-app" --timeout=120s
   log "pods:"
   kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pods
 fi

@@ -16,10 +16,15 @@ spec:
       {{- include "trading-floor.selectorLabels" (dict "component" "app" "Release" .Release "Chart" .Chart) | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.app.podAnnotations }}
       annotations:
+        {{- /* Forces a rollout when the chart-managed Secret's content changes — otherwise
+             an existing pod keeps its stale env until something else restarts it. Only
+             covers the Secret this chart creates (secrets.create); an externally-managed
+             secrets.existingSecret is the caller's own rollout responsibility. */}}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.app.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "trading-floor.labels" . | nindent 8 }}
         {{- include "trading-floor.selectorLabels" (dict "component" "app" "Release" .Release "Chart" .Chart) | nindent 8 }}

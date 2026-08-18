@@ -46,28 +46,20 @@ print(alpaca_broker.get_latest_price("AAPL"))
 You should see your paper account's cash/buying power, whether the market is
 open right now, and a live AAPL quote.
 
-## 6. Important: one real account, one virtual ledger
-Alpaca's personal Trading API gives you **one account**. This code keeps a
-local virtual ledger on top of it rather than trusting Alpaca's own
-cash/position numbers directly:
+## 6. Important: one real account, no virtual ledger
+Alpaca's personal Trading API gives you **one account**, and the trader's
+`balance`, `holdings`, and portfolio value are all live reads of that real
+account (via `alpaca_broker.get_account_info()`/`get_real_positions()`) —
+there's no separate SQLite-tracked starting balance to keep in sync with it.
 
-- The trader's `balance` and `holdings` are a virtual ledger in your existing
-  SQLite database — exactly like before.
 - Every buy/sell places a **real market order** against your Alpaca paper
-  account and books the real fill price into that ledger.
-- Before any sell, the code double-checks the real Alpaca account actually
-  still holds enough shares of that symbol — a sanity check against the two
-  ledgers drifting apart (a fill that hasn't posted yet, a manual trade placed
-  outside this app, etc.), not a cross-trader race anymore now that there's
-  only one trader.
-
-One thing to set up yourself, since it's an account-design decision rather
-than a code decision:
-
-- **Don't let the virtual balance exceed real buying power.** With
-  `INITIAL_BALANCE = 10_000`, that's comfortably within Alpaca's default
-  $100k paper balance, but you should raise `INITIAL_BALANCE` or fund the
-  account accordingly if you go live with real money later.
+  account; `balance`/`holdings` reflect the result immediately since they're
+  read live, not bookkept locally.
+- The only thing kept in local SQLite is this app's own state: the evolvable
+  strategy text and its own order history (rationale, timestamps) — useful
+  for audit/display, not for balance math.
+- Before any sell, the code checks the real Alpaca account actually holds
+  enough shares of that symbol right now.
 
 ## 7. Going live later
 When you're ready:

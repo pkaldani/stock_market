@@ -5,6 +5,7 @@ import { getMarket, getTrader, getTraderLogs } from "./api";
 import { TraderPanel } from "./panel";
 import { TraderState } from "./state";
 import { initTheme } from "./theme";
+import { TradePage } from "./trade";
 
 const DATA_POLL_MS = 6000;
 const LOG_POLL_MS = 2000;
@@ -14,6 +15,30 @@ initTheme(document.getElementById("btn-theme") as HTMLButtonElement);
 const panelHost = document.getElementById("panels")!;
 let state: TraderState;
 let panel: TraderPanel;
+
+const tradePageHost = document.getElementById("trade-page") as HTMLElement;
+const navDashboard = document.getElementById("nav-dashboard") as HTMLButtonElement;
+const navTrade = document.getElementById("nav-trade") as HTMLButtonElement;
+let tradePage: TradePage | null = null;
+
+function showDashboard(): void {
+  panelHost.hidden = false;
+  tradePageHost.hidden = true;
+  navDashboard.dataset.active = "true";
+  navTrade.dataset.active = "false";
+}
+
+function showTrade(): void {
+  panelHost.hidden = true;
+  tradePageHost.hidden = false;
+  navDashboard.dataset.active = "false";
+  navTrade.dataset.active = "true";
+  if (!tradePage) tradePage = new TradePage(tradePageHost);
+  void tradePage.activate();
+}
+
+navDashboard.addEventListener("click", showDashboard);
+navTrade.addEventListener("click", showTrade);
 
 async function loadMarket(): Promise<void> {
   try {
