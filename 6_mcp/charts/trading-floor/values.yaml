@@ -1,0 +1,109 @@
+# Default values for the trading-floor chart.
+
+image:
+  registry: ""            # e.g. "ghcr.io/your-org" — left blank for local/dev registries
+  repository: traders
+  tag: ""                 # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# --- app: the API (backend/api.py) and engine (backend/trading_floor.py), one pod ---
+#
+# They're deployed as two containers in a single Pod, sharing one PVC, rather than as
+# two Deployments. Why: both processes address accounts.db and memory/<name>.db as
+# plain relative paths on the local filesystem (see CLAUDE.md — "the API and engine
+# only share state through SQLite"); splitting them into separate Deployments would
+# need a ReadWriteMany volume, which many clusters don't have a StorageClass for.
+# There is also exactly one trader identity (TRADER_NAME) and no distributed lock
+# around the ledger, so the engine container can never run more than one replica —
+# bundling it with the api container keeps that invariant impossible to violate by
+# accident.
+app:
+  replicaCount: 1
+  api:
+    image:
+      repository: ""       # falls back to image.repository + "-api" if unset
+      tag: ""
+    port: 8000
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+  engine:
+    image:
+      repository: ""       # falls back to image.repository + "-engine" if unset
+      tag: ""
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+service:
+  api:
+    type: ClusterIP
+    port: 8000
+
+# --- frontend: static dashboard behind nginx, stateless, scales independently ---
+frontend:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ""         # falls back to image.repository + "-frontend" if unset
+    tag: ""
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  service:
+    type: ClusterIP
+    port: 80
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: trading-floor.example.com
+  tls: []
+  # - secretName: trading-floor-tls
+  #   hosts: [trading-floor.example.com]
+
+persistence:
+  enabled: true
+  # ReadWriteOnce is enough since api+engine share one pod (see note above).
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  storageClassName: ""     # "" uses the cluster default StorageClass
+  existingClaim: ""        # set to reuse a PVC instead of creating one
+
+# Non-secret runtime config, rendered into a ConfigMap and consumed by both
+# the api and engine containers. Mirrors the env vars documented in CLAUDE.md.
+config:
+  ALPACA_PAPER: "true"
+  TRADER_MODEL_NAME: "gpt-5.4-mini"
+  RUN_EVERY_N_MINUTES: "1440"
+  RUN_EVEN_WHEN_MARKET_IS_CLOSED: "false"
+  MIN_HOLD_HOURS: "24"
+
+# Secrets required for real trading/research/notifications (see CLAUDE.md's
+# Environment variables section). Prefer `existingSecret` in any real
+# deployment so keys never land in values.yaml or a Helm release's history.
+secrets:
+  # Name of a pre-created Secret with the keys listed under `keys` below.
+  # Takes precedence over `create` when set.
+  existingSecret: ""
+  # If true and existingSecret is unset, the chart creates the Secret from
+  # the plaintext values below — convenient for local/dev, not recommended
+  # for anything else.
+  create: false
+  values:
+    ALPACA_API_KEY: ""
+    ALPACA_SECRET_KEY: ""
+    OPENAI_API_KEY: ""
+    TAVILY_API_KEY: ""
+    PUSHOVER_USER: ""
+    PUSHOVER_TOKEN: ""

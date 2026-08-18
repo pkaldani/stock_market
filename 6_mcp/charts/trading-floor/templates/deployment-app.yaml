@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trading-floor.fullname" . }}-app
+  labels:
+    {{- include "trading-floor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  # Fixed at 1: the engine container is a single trading-agent identity with no
+  # distributed lock around the SQLite ledger (see values.yaml's `app` comment).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "trading-floor.selectorLabels" (dict "component" "app" "Release" .Release "Chart" .Chart) | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.app.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "trading-floor.labels" . | nindent 8 }}
+        {{- include "trading-floor.selectorLabels" (dict "component" "app" "Release" .Release "Chart" .Chart) | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "trading-floor.image" (dict "root" . "repoOverride" .Values.app.api.image.repository "tagOverride" .Values.app.api.image.tag "suffix" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.app.api.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "trading-floor.fullname" . }}-config
+            - secretRef:
+                name: {{ include "trading-floor.secretName" . }}
+          env:
+            - name: DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.app.api.resources | nindent 12 }}
+        - name: engine
+          image: {{ include "trading-floor.image" (dict "root" . "repoOverride" .Values.app.engine.image.repository "tagOverride" .Values.app.engine.image.tag "suffix" "engine") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "trading-floor.fullname" . }}-config
+            - secretRef:
+                name: {{ include "trading-floor.secretName" . }}
+          env:
+            - name: DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.app.engine.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "trading-floor.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

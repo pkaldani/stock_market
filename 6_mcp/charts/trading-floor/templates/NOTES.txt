@@ -1,0 +1,31 @@
+Trading floor deployed as release "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+
+{{- if not .Values.secrets.existingSecret }}
+{{- if not .Values.secrets.create }}
+
+WARNING: no `secrets.existingSecret` set and `secrets.create` is false — no
+Secret was created. The api/engine containers will start without
+ALPACA_API_KEY/ALPACA_SECRET_KEY/etc. and the engine will fail to place
+trades. Create a Secret with those keys and set `secrets.existingSecret`,
+or set `secrets.create=true` with `secrets.values.*` for local/dev use.
+{{- end }}
+{{- end }}
+
+{{- if .Values.frontend.enabled }}
+
+Dashboard:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "trading-floor.fullname" . }}-frontend {{ .Values.frontend.service.port }}:{{ .Values.frontend.service.port }}
+  then open http://localhost:{{ .Values.frontend.service.port }}
+{{- end }}
+{{- end }}
+
+API docs:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "trading-floor.fullname" . }}-api {{ .Values.service.api.port }}:{{ .Values.service.api.port }}
+  then open http://localhost:{{ .Values.service.api.port }}/docs
+
+Engine logs (the trading loop's own stdout, separate from the /api/trader/logs
+trace log the dashboard reads from SQLite):
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "trading-floor.fullname" . }}-app -c engine -f

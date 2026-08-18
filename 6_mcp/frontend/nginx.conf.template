@@ -1,0 +1,24 @@
+# Mirrors vite.config.ts's dev proxy: the browser only ever talks to this origin,
+# /api is forwarded server-side, so there's no cross-origin request and no CORS to set.
+# ${BACKEND_UPSTREAM} is substituted by the nginx image's built-in envsubst-on-templates
+# entrypoint from the container's env (see Dockerfile's `frontend` target).
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://${BACKEND_UPSTREAM}/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        try_files $uri /index.html;
+    }
+}

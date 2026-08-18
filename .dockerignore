@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.claude
+.claude-plugin
+**/__pycache__
+**/*.pyc
+
+6_mcp/accounts.db
+6_mcp/memory/*
+!6_mcp/memory/memory.txt
+
+6_mcp/frontend/node_modules
+6_mcp/frontend/dist
+
+*.zip

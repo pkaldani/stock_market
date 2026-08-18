@@ -1,0 +1,9 @@
+apiVersion: v2
+name: trading-floor
+description: >-
+  Autonomous LLM trading agent ("Traders"): a FastAPI read-only backend, the
+  trading engine loop, and a static TypeScript dashboard, backed by Alpaca
+  paper trading and a SQLite ledger.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
