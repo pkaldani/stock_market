@@ -28,6 +28,7 @@ dependencies = [
     "pypdf>=6.10.2",
     "python-dotenv>=1.2.2",
     "python-pptx>=1.0.2",
+    "pyyaml>=6.0",
     "requests>=2.33.1",
     "rich>=15.0.0",
     "strands-agents[openai]>=1.43.0",

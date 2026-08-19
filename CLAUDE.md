@@ -106,7 +106,13 @@ sync. `backend/api.py`'s `/api/trader` endpoint reads a 5-minute TTL-cached snap
 order-path code above never uses that cache, so it always acts on fresh state. `buy_shares`/`sell_shares`
 also start with `_check_hold_period`, which raises if the same symbol was last traded (buy or sell)
 within `MIN_HOLD_HOURS` — the code-level day-trading guardrail requested alongside the longer scheduler
-interval. See `backend/setup_guide.md` for the full writeup of this design and its sharp edges.
+interval. `buy_shares` additionally starts with `_check_symbol_allowed`, which raises if the symbol
+isn't in `backend/symbol_whitelist.yaml` (loaded/cached by `backend/symbol_whitelist.py`) — a curated,
+hand-edited list of tickers the trader is allowed to open new positions in, also surfaced in
+`templates.trader_instructions()` so the agent doesn't waste Researcher turns on tickers it can't buy.
+This restriction is buys-only: `sell_shares` has no such check, so an existing holding outside the list
+(e.g. a legacy position from before the whitelist existed) can always be exited. See
+`backend/setup_guide.md` for the full writeup of this design and its sharp edges.
 
 Every account/MCP tool (`get_balance`, `buy_shares`, `change_strategy`, the `accounts://...` resources,
 `accounts_client.py`) takes **no name argument** — `Account.get()` always resolves to `TRADER_NAME`.

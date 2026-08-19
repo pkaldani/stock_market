@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from . import alpaca_broker
 from .database import write_account, read_account, write_log
+from .symbol_whitelist import is_symbol_allowed
 
 load_dotenv(override=True)
 
@@ -105,8 +106,19 @@ class Account(BaseModel):
                 f"{MIN_HOLD_HOURS} hours (eligible again at {eligible_at.strftime('%Y-%m-%d %H:%M:%S')})."
             )
 
+    def _check_symbol_allowed(self, symbol: str) -> None:
+        """Block buying anything outside the approved symbol whitelist (buys only —
+        selling an existing holding is always allowed, even for a symbol that's not,
+        or no longer, on the list)."""
+        if not is_symbol_allowed(symbol):
+            raise ValueError(
+                f"{symbol} is not on the approved symbol whitelist "
+                f"(backend/symbol_whitelist.yaml) — buying it is not allowed."
+            )
+
     def buy_shares(self, symbol: str, quantity: int, rationale: str, source: str = "agent") -> str:
         """ Buy shares via a REAL Alpaca market order. """
+        self._check_symbol_allowed(symbol)
         self._check_hold_period(symbol)
         price = alpaca_broker.get_latest_price(symbol)
         estimated_cost = price * quantity

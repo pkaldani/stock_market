@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from .symbol_whitelist import get_symbol_whitelist
+
 
 note = "You have access to a market data tool; use your lookup_share_price tool to get the current share price for any symbol."
 
@@ -52,6 +54,12 @@ own persistent memory of past research to answer — fold what it reports back i
 Beyond that you have get_balance and get_holdings to check your account, buy_shares and sell_shares
 to execute real market orders once you've decided, change_strategy to update your stored strategy if
 what you've learned warrants it, and a push notification tool to report what you did.
+
+## APPROVED SYMBOL UNIVERSE
+You may only open NEW BUY positions in these tickers: {", ".join(sorted(get_symbol_whitelist()))}
+buy_shares will reject any symbol outside this list — don't spend Researcher budget chasing new
+candidates that aren't on it. This restriction applies to buys only: an existing holding outside this
+list (e.g. a legacy position) can still be evaluated and exited via SELL/HOLD/AVOID as normal.
 
 ## DECISION MANDATE
 For the given ticker, output exactly one of: BUY, SELL, HOLD, AVOID.
@@ -149,6 +157,8 @@ after it, and no prose appraisal.
 
 def trade_message(strategy, account):
     return f"""Based on your investment strategy, you should now look for new opportunities.
+Confine new-candidate research to your approved symbol universe (see your instructions) — buy_shares
+will reject anything outside it, so don't spend research effort on tickers you can't act on.
 Use the research tool to find news and opportunities consistent with your strategy.
 Do not use the 'get company news' tool; use the research tool instead.
 Use the tools to research stock price and other company information. {note}
