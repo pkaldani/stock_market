@@ -37,6 +37,16 @@ async def sell_shares(symbol: str, quantity: int, rationale: str) -> float:
     return Account.get().sell_shares(symbol, quantity, rationale)
 
 @mcp.tool()
+async def get_realized_pnl() -> dict:
+    """Get realized profit/loss from closed trades (FIFO-matched): a full
+    trade-by-trade ledger plus per-symbol and total rollups. Your account
+    context already includes a compact realized_pnl_summary (win rate,
+    average win/loss, best/worst trade) on every run — use this tool when you
+    want the full closed-trade detail behind that summary, e.g. to review
+    which past trades actually worked before updating your strategy."""
+    return Account.get().get_realized_pnl()
+
+@mcp.tool()
 async def change_strategy(strategy: str) -> str:
     """At your discretion, if you choose to, call this to change your investment strategy for the future.
 

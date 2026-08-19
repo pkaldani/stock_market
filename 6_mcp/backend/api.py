@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from backend import alpaca_broker, market
 from backend.accounts import Account
 from backend.database import read_log
+from backend.symbol_whitelist import get_symbol_whitelist, get_symbol_sector
 from backend.trading_floor import TRADER_NAME, MODEL_NAME
 
 # Mirrors the log colours in demo/ so the frontend reproduces the same panel.
@@ -105,6 +106,14 @@ def get_trader() -> dict:
     else:
         holdings, balance, portfolio_value, pnl, real_account = [], None, None, None, None
 
+    try:
+        # Same alpaca_broker.get_realized_pnl() the /api/trader/realized-pnl
+        # endpoint and the trader's own MCP tool use (5min-TTL cached there),
+        # so this doesn't add a fresh Alpaca call on every ~6s dashboard poll.
+        realized_pnl_summary = account.realized_pnl_summary()
+    except Exception:
+        realized_pnl_summary = None
+
     return {
         "name": TRADER_NAME,
         "model_name": MODEL_NAME,
@@ -112,11 +121,21 @@ def get_trader() -> dict:
         "strategy": account.strategy,
         "portfolio_value": portfolio_value,
         "pnl": pnl,
+        "realized_pnl_summary": realized_pnl_summary,
         "holdings": holdings,
         "transactions": account.list_transactions(),
         "time_series": [{"datetime": ts, "value": value} for ts, value in account.portfolio_value_time_series],
         "real_account": real_account,
     }
+
+
+@app.get("/api/whitelist")
+def get_whitelist() -> list[dict]:
+    """The approved symbol universe the trader may open new BUY positions in,
+    with each symbol's sector (see backend/symbol_whitelist.yaml). Static for
+    the life of the process — editing the YAML requires a redeploy to take
+    effect — so the frontend fetches this once rather than polling it."""
+    return [{"symbol": s, "sector": get_symbol_sector(s)} for s in sorted(get_symbol_whitelist())]
 
 
 @app.get("/api/trader/logs")

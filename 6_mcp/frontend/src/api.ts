@@ -30,6 +30,19 @@ export interface Transaction {
   source: "agent" | "manual";
 }
 
+// Compact realized-P&L/win-rate summary — see Account.realized_pnl_summary
+// in accounts.py. null fields mean there aren't enough closed trades yet to
+// compute them (e.g. a fresh account).
+export interface RealizedPnlSummary {
+  total_realized_pnl: number;
+  closed_trade_count: number;
+  win_rate_pct: number | null;
+  avg_win: number | null;
+  avg_loss: number | null;
+  best_trade_pnl: number | null;
+  worst_trade_pnl: number | null;
+}
+
 export interface TimePoint {
   datetime: string;
   value: number;
@@ -59,6 +72,10 @@ export interface TraderDetail {
   strategy: string;
   portfolio_value: number | null;
   pnl: number | null;
+  // Computed independently of the account snapshot above (its own try/except
+  // server-side), so this can be present even when real_account is null, or
+  // vice versa.
+  realized_pnl_summary: RealizedPnlSummary | null;
   holdings: Holding[];
   transactions: Transaction[];
   time_series: TimePoint[];
@@ -96,6 +113,13 @@ export interface RealizedPnl {
 export interface PriceQuote {
   symbol: string;
   price: number;
+}
+
+// The approved symbol universe (see backend/symbol_whitelist.yaml) — static
+// for the life of the process, fetched once rather than polled.
+export interface WhitelistEntry {
+  symbol: string;
+  sector: string | null;
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -140,6 +164,10 @@ export function getRealizedPnl(): Promise<RealizedPnl> {
 
 export function getPrice(symbol: string): Promise<PriceQuote> {
   return get(`/api/price/${encodeURIComponent(symbol)}`);
+}
+
+export function getWhitelist(): Promise<WhitelistEntry[]> {
+  return get("/api/whitelist");
 }
 
 export function buyShares(symbol: string, quantity: number, rationale?: string): Promise<TraderDetail> {

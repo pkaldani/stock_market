@@ -24,6 +24,10 @@ export class TransactionsView {
     for (const t of transactions.slice(-MAX_ROWS).reverse()) {
       const row = document.createElement("div");
       row.className = "txn-row";
+      // The trader's own stated reasoning for this trade — surfaced as a
+      // hover tooltip rather than an extra visible line, matching
+      // heatmap.ts's tile.title pattern, since row space here is tight.
+      if (t.rationale) row.title = t.rationale;
 
       const date = document.createElement("span");
       date.className = "txn-date";

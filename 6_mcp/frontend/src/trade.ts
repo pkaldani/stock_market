@@ -241,6 +241,7 @@ export class TradePage {
     for (const t of transactions.slice(-25).reverse()) {
       const row = document.createElement("div");
       row.className = "history-row";
+      if (t.rationale) row.title = t.rationale;
       const side = t.quantity >= 0 ? "buy" : "sell";
       row.innerHTML = `
         <span class="txn-date">${dateOf(t.timestamp)}</span>

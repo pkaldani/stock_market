@@ -1,7 +1,7 @@
 // App entry point: build the trader panel, then poll the backend for portfolio
 // data and activity logs. The trading floor runs on its own; this only reads.
 
-import { getMarket, getTrader, getTraderLogs } from "./api";
+import { getMarket, getTrader, getTraderLogs, getWhitelist } from "./api";
 import { TraderPanel } from "./panel";
 import { TraderState } from "./state";
 import { initTheme } from "./theme";
@@ -80,9 +80,18 @@ async function pollLogs(): Promise<void> {
   }
 }
 
+async function loadWhitelist(): Promise<void> {
+  try {
+    panel.setWhitelist(await getWhitelist());
+  } catch (err) {
+    console.error("whitelist fetch failed", err);
+  }
+}
+
 async function main(): Promise<void> {
   await loadMarket();
   await buildPanel();
+  await loadWhitelist();
   await pollData();
   await pollLogs();
   setInterval(pollData, DATA_POLL_MS);

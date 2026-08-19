@@ -1,5 +1,6 @@
 import sqlite3
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -39,7 +40,49 @@ def read_account(name):
         cursor.execute('SELECT account FROM accounts WHERE name = ?', (name.lower(),))
         row = cursor.fetchone()
         return json.loads(row[0]) if row else None
-    
+
+
+@contextmanager
+def account_transaction(name: str):
+    """Hold one exclusive SQLite write lock across a full read-modify-write
+    cycle on a single account's row, so two processes that can both write it
+    (the trading-floor engine running the LLM trader, and api.py's
+    manual-trade endpoints) can't interleave and silently drop one process's
+    write. A plain read_account() followed later by write_account() is two
+    separate transactions with the Python-side mutation happening in between,
+    unprotected — BEGIN IMMEDIATE here acquires the write lock before the
+    read, so nothing else can start its own read-modify-write cycle until
+    this one commits or rolls back.
+
+    Yields the account's stored fields as a plain dict (a fresh skeleton if
+    the row doesn't exist yet, mirroring Account.get()'s own defaults) for
+    the caller to mutate in place. The mutated dict is written back
+    automatically on a clean exit; nothing is written if the block raises.
+    """
+    conn = sqlite3.connect(DB, timeout=30)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+        cursor.execute('SELECT account FROM accounts WHERE name = ?', (name.lower(),))
+        row = cursor.fetchone()
+        fields = json.loads(row[0]) if row else {
+            "name": name, "strategy": "", "transactions": [], "portfolio_value_time_series": []
+        }
+        yield fields
+        json_data = json.dumps(fields)
+        cursor.execute('''
+            INSERT INTO accounts (name, account)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET account=excluded.account
+        ''', (name.lower(), json_data))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def write_log(name: str, type: str, message: str):
     """
     Write a log entry to the logs table.

@@ -36,8 +36,25 @@ mcp = FastMCP("stock-analysis")
 # Data fetch helpers
 # --------------------------------------------------------------------------
 
+_history_cache: dict[tuple[str, str, str], pd.DataFrame] = {}
+
+
 def _fetch_history(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    """Download OHLCV data via yfinance and normalize the dataframe."""
+    """Download OHLCV data via yfinance and normalize the dataframe.
+
+    Cached in-process per (ticker, period, interval) for the lifetime of this
+    MCP server subprocess (one per Researcher run — see mcp_servers.py), since
+    nothing downstream mutates the returned DataFrame. get_full_report calls
+    get_technical_analysis which calls this, and a Researcher pass often also
+    calls optimize_indicator_parameters for the same ticker/window in the same
+    cycle — without this, each of those re-hits yfinance for identical data.
+    Mirrors the existing per-symbol cache in asset_server.py's get_asset_info.
+    """
+    cache_key = (ticker, period, interval)
+    cached = _history_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     tk = yf.Ticker(ticker)
     df = tk.history(period=period, interval=interval, auto_adjust=False)
     if df.empty:
@@ -45,6 +62,7 @@ def _fetch_history(ticker: str, period: str = "6mo", interval: str = "1d") -> pd
                           f"(period={period}, interval={interval}). Check the symbol.")
     df = df.rename(columns=str.title)  # Open, High, Low, Close, Volume
     df.index.name = "Date"
+    _history_cache[cache_key] = df
     return df
 
 
@@ -231,9 +249,18 @@ def obv(df: pd.DataFrame) -> pd.Series:
 
 
 def vwap(df: pd.DataFrame) -> pd.Series:
+    """Volume-weighted average price, reset at the start of each session
+    (calendar day) rather than accumulated since the start of the fetched
+    window. A VWAP that never resets isn't the standard intraday "fair value"
+    anchor traders mean by the term — it's a long-run average price that
+    silently drifts further from the current price the longer `period` is,
+    which is exactly what happens for this project's default daily-bar,
+    multi-month/year windows."""
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-    cum_vol = df["Volume"].cumsum()
-    cum_vol_price = (typical_price * df["Volume"]).cumsum()
+    vol_price = typical_price * df["Volume"]
+    session = df.index.date
+    cum_vol = df["Volume"].groupby(session).cumsum()
+    cum_vol_price = vol_price.groupby(session).cumsum()
     return cum_vol_price / cum_vol.replace(0, np.nan)
 
 
@@ -391,16 +418,47 @@ DEFAULT_GRID = {
 }
 
 
-def _sharpe(returns: pd.Series) -> float:
-    """Annualized Sharpe-like score (mean/std of daily strategy returns)."""
+# Bars per year implied by each yfinance interval, used to annualize a Sharpe-
+# like score correctly regardless of bar frequency. 6.5 trading hours/day and
+# 252 trading days/year are the standard US-equity conventions.
+BARS_PER_YEAR = {
+    "1m": 98280.0, "2m": 49140.0, "5m": 19656.0, "15m": 6552.0, "30m": 3276.0,
+    "60m": 1638.0, "90m": 1092.0, "1h": 1638.0,
+    "1d": 252.0, "5d": 50.4, "1wk": 52.0, "1mo": 12.0, "3mo": 4.0,
+}
+
+DEFAULT_COST_BPS = 5.0  # flat round-trip cost assumed per position flip, in basis points
+
+
+def _annualization_factor(interval: str) -> float:
+    """Bars-per-year for `interval`, defaulting to daily (252) for any
+    interval not in BARS_PER_YEAR."""
+    return BARS_PER_YEAR.get(interval, 252.0)
+
+
+def _apply_cost(position: pd.Series, daily_ret: pd.Series, cost_bps: float = DEFAULT_COST_BPS) -> pd.Series:
+    """Strategy return net of a flat per-flip transaction cost (spread/
+    slippage proxy), so the grid search doesn't reward high-turnover
+    parameter sets (e.g. tight RSI/Bollinger thresholds) that only look good
+    in a frictionless backtest."""
+    turnover = position.diff().abs().fillna(0)
+    cost = turnover * (cost_bps / 10000)
+    return position * daily_ret - cost
+
+
+def _sharpe(returns: pd.Series, interval: str = "1d") -> float:
+    """Annualized Sharpe-like score (mean/std of per-bar strategy returns),
+    annualized using the bar frequency implied by `interval` rather than
+    always assuming daily bars — see BARS_PER_YEAR."""
     clean = returns.dropna()
     std = clean.std(ddof=0)
     if len(clean) < 20 or std == 0 or pd.isna(std):
         return -np.inf
-    return float((clean.mean() / std) * np.sqrt(252))
+    return float((clean.mean() / std) * np.sqrt(_annualization_factor(interval)))
 
 
-def optimize_ma_crossover(close: pd.Series, ma_func, fast_candidates, slow_candidates) -> dict:
+def optimize_ma_crossover(close: pd.Series, ma_func, fast_candidates, slow_candidates,
+                           interval: str = "1d") -> dict:
     """Best (fast, slow) pair for a moving-average crossover long/flat strategy."""
     daily_ret = close.pct_change()
     best = {"fast": fast_candidates[0], "slow": slow_candidates[-1], "sharpe": -np.inf}
@@ -410,20 +468,20 @@ def optimize_ma_crossover(close: pd.Series, ma_func, fast_candidates, slow_candi
         fast_ma = ma_func(close, fast)
         slow_ma = ma_func(close, slow)
         position = (fast_ma > slow_ma).astype(int).shift(1).fillna(0)
-        score = _sharpe(position * daily_ret)
+        score = _sharpe(_apply_cost(position, daily_ret), interval)
         if score > best["sharpe"]:
             best = {"fast": fast, "slow": slow, "sharpe": score}
     return best
 
 
-def optimize_single_ma_trend(close: pd.Series, window_candidates) -> dict:
+def optimize_single_ma_trend(close: pd.Series, window_candidates, interval: str = "1d") -> dict:
     """Best single MA window for a price-vs-MA trend-following strategy."""
     daily_ret = close.pct_change()
     best = {"window": window_candidates[0], "sharpe": -np.inf}
     for window in window_candidates:
         ma_line = sma(close, window)
         position = (close > ma_line).astype(int).shift(1).fillna(0)
-        score = _sharpe(position * daily_ret)
+        score = _sharpe(_apply_cost(position, daily_ret), interval)
         if score > best["sharpe"]:
             best = {"window": window, "sharpe": score}
     return best
@@ -438,20 +496,21 @@ def _mean_reversion_position(daily_ret: pd.Series, indicator: pd.Series, low_th:
     return raw.ffill().fillna(0).shift(1).fillna(0)
 
 
-def optimize_rsi(close: pd.Series, window_candidates, threshold_pairs) -> dict:
+def optimize_rsi(close: pd.Series, window_candidates, threshold_pairs, interval: str = "1d") -> dict:
     daily_ret = close.pct_change()
     best = {"window": window_candidates[0], "low_th": 30, "high_th": 70, "sharpe": -np.inf}
     for window in window_candidates:
         r = rsi(close, window)
         for low_th, high_th in threshold_pairs:
             position = _mean_reversion_position(daily_ret, r, low_th, high_th)
-            score = _sharpe(position * daily_ret)
+            score = _sharpe(_apply_cost(position, daily_ret), interval)
             if score > best["sharpe"]:
                 best = {"window": window, "low_th": low_th, "high_th": high_th, "sharpe": score}
     return best
 
 
-def optimize_macd(close: pd.Series, fast_candidates, slow_candidates, signal_candidates) -> dict:
+def optimize_macd(close: pd.Series, fast_candidates, slow_candidates, signal_candidates,
+                   interval: str = "1d") -> dict:
     daily_ret = close.pct_change()
     best = {"fast": 12, "slow": 26, "signal": 9, "sharpe": -np.inf}
     for fast, slow, sig in product(fast_candidates, slow_candidates, signal_candidates):
@@ -459,13 +518,13 @@ def optimize_macd(close: pd.Series, fast_candidates, slow_candidates, signal_can
             continue
         macd_line, signal_line, _ = macd(close, fast, slow, sig)
         position = (macd_line > signal_line).astype(int).shift(1).fillna(0)
-        score = _sharpe(position * daily_ret)
+        score = _sharpe(_apply_cost(position, daily_ret), interval)
         if score > best["sharpe"]:
             best = {"fast": fast, "slow": slow, "signal": sig, "sharpe": score}
     return best
 
 
-def optimize_bollinger(df: pd.DataFrame, window_candidates, std_candidates) -> dict:
+def optimize_bollinger(df: pd.DataFrame, window_candidates, std_candidates, interval: str = "1d") -> dict:
     close = df["Close"]
     daily_ret = close.pct_change()
     best = {"window": 20, "num_std": 2.0, "sharpe": -np.inf}
@@ -475,20 +534,21 @@ def optimize_bollinger(df: pd.DataFrame, window_candidates, std_candidates) -> d
         raw[close < lower] = 1
         raw[close > upper] = 0
         position = raw.ffill().fillna(0).shift(1).fillna(0)
-        score = _sharpe(position * daily_ret)
+        score = _sharpe(_apply_cost(position, daily_ret), interval)
         if score > best["sharpe"]:
             best = {"window": window, "num_std": num_std, "sharpe": score}
     return best
 
 
-def optimize_stochastic(df: pd.DataFrame, k_candidates, d_candidates, low_th: float = 20, high_th: float = 80) -> dict:
+def optimize_stochastic(df: pd.DataFrame, k_candidates, d_candidates, low_th: float = 20, high_th: float = 80,
+                         interval: str = "1d") -> dict:
     close = df["Close"]
     daily_ret = close.pct_change()
     best = {"k_window": 14, "d_window": 3, "sharpe": -np.inf}
     for k_w, d_w in product(k_candidates, d_candidates):
         k, _ = stochastic_oscillator(df, k_w, d_w)
         position = _mean_reversion_position(daily_ret, k, low_th, high_th)
-        score = _sharpe(position * daily_ret)
+        score = _sharpe(_apply_cost(position, daily_ret), interval)
         if score > best["sharpe"]:
             best = {"k_window": k_w, "d_window": d_w, "sharpe": score}
     return best
@@ -528,7 +588,8 @@ def _walk_forward_splits(n: int, n_splits: int = 4, min_train: int = 60, min_tes
     return splits
 
 
-def walk_forward_validate(df: pd.DataFrame, n_splits: int = 4, grid: dict | None = None) -> dict | None:
+def walk_forward_validate(df: pd.DataFrame, n_splits: int = 4, grid: dict | None = None,
+                           interval: str = "1d") -> dict | None:
     """
     Anchored walk-forward validation — the honest counterpart to
     optimize_all_parameters(). For each fold: optimize every indicator family
@@ -559,47 +620,50 @@ def walk_forward_validate(df: pd.DataFrame, n_splits: int = 4, grid: dict | None
         train_close = train_df["Close"]
         test_idx = slice(test_start, test_end)
 
-        sma_cross = optimize_ma_crossover(train_close, sma, grid["sma_fast"], grid["sma_slow"])
-        sma_trend = optimize_single_ma_trend(train_close, grid["sma_trend"])
-        ema_cross = optimize_ma_crossover(train_close, ema, grid["ema_fast"], grid["ema_slow"])
-        rsi_best = optimize_rsi(train_close, grid["rsi_window"], grid["rsi_thresholds"])
-        macd_best = optimize_macd(train_close, grid["macd_fast"], grid["macd_slow"], grid["macd_signal"])
-        bb_best = optimize_bollinger(train_df, grid["bb_window"], grid["bb_std"])
-        stoch_best = optimize_stochastic(train_df, grid["stoch_k"], grid["stoch_d"])
+        sma_cross = optimize_ma_crossover(train_close, sma, grid["sma_fast"], grid["sma_slow"], interval=interval)
+        sma_trend = optimize_single_ma_trend(train_close, grid["sma_trend"], interval=interval)
+        ema_cross = optimize_ma_crossover(train_close, ema, grid["ema_fast"], grid["ema_slow"], interval=interval)
+        rsi_best = optimize_rsi(train_close, grid["rsi_window"], grid["rsi_thresholds"], interval=interval)
+        macd_best = optimize_macd(train_close, grid["macd_fast"], grid["macd_slow"], grid["macd_signal"],
+                                   interval=interval)
+        bb_best = optimize_bollinger(train_df, grid["bb_window"], grid["bb_std"], interval=interval)
+        stoch_best = optimize_stochastic(train_df, grid["stoch_k"], grid["stoch_d"], interval=interval)
 
         # Score each fold-chosen parameter set on the held-out block only.
         # Indicators are computed on the full series (so rolling windows have
-        # proper lookback) but the Sharpe score only ever looks at test_idx.
+        # proper lookback) but the cost-adjusted Sharpe score only ever looks
+        # at test_idx. _apply_cost is computed over the full series first so a
+        # position change right at the fold boundary still gets charged.
         fast_ma, slow_ma_ = sma(close, sma_cross["fast"]), sma(close, sma_cross["slow"])
         pos = (fast_ma > slow_ma_).astype(int).shift(1).fillna(0)
-        fold_scores["sma_crossover"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["sma_crossover"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
         ma_line = sma(close, sma_trend["window"])
         pos = (close > ma_line).astype(int).shift(1).fillna(0)
-        fold_scores["sma_trend"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["sma_trend"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
         fast_ema, slow_ema = ema(close, ema_cross["fast"]), ema(close, ema_cross["slow"])
         pos = (fast_ema > slow_ema).astype(int).shift(1).fillna(0)
-        fold_scores["ema_crossover"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["ema_crossover"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
         r = rsi(close, rsi_best["window"])
         pos = _mean_reversion_position(daily_ret, r, rsi_best["low_th"], rsi_best["high_th"])
-        fold_scores["rsi"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["rsi"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
         macd_line, signal_line, _ = macd(close, macd_best["fast"], macd_best["slow"], macd_best["signal"])
         pos = (macd_line > signal_line).astype(int).shift(1).fillna(0)
-        fold_scores["macd"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["macd"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
         upper, _, lower = bollinger_bands(close, bb_best["window"], bb_best["num_std"])
         raw = pd.Series(np.nan, index=close.index)
         raw[close < lower] = 1
         raw[close > upper] = 0
         pos = raw.ffill().fillna(0).shift(1).fillna(0)
-        fold_scores["bollinger"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["bollinger"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
         k, _ = stochastic_oscillator(df, stoch_best["k_window"], stoch_best["d_window"])
         pos = _mean_reversion_position(daily_ret, k, 20, 80)
-        fold_scores["stochastic"].append(_sharpe((pos * daily_ret).iloc[test_idx]))
+        fold_scores["stochastic"].append(_sharpe(_apply_cost(pos, daily_ret).iloc[test_idx], interval))
 
     summary = {}
     for family, scores in fold_scores.items():
@@ -672,7 +736,7 @@ def build_honest_assessment(backtest_scores: dict, wf_summary: dict | None) -> d
     }
 
 
-def optimize_all_parameters(df: pd.DataFrame, grid: dict | None = None) -> dict:
+def optimize_all_parameters(df: pd.DataFrame, grid: dict | None = None, interval: str = "1d") -> dict:
     """Run the full optimization sweep and return chosen params + their
     backtested scores."""
     if len(df) < 60:
@@ -684,13 +748,22 @@ def optimize_all_parameters(df: pd.DataFrame, grid: dict | None = None) -> dict:
     grid = grid or DEFAULT_GRID
     close = df["Close"]
 
-    sma_cross = optimize_ma_crossover(close, sma, grid["sma_fast"], grid["sma_slow"])
-    sma_trend = optimize_single_ma_trend(close, grid["sma_trend"])
-    ema_cross = optimize_ma_crossover(close, ema, grid["ema_fast"], grid["ema_slow"])
-    rsi_best = optimize_rsi(close, grid["rsi_window"], grid["rsi_thresholds"])
-    macd_best = optimize_macd(close, grid["macd_fast"], grid["macd_slow"], grid["macd_signal"])
-    bb_best = optimize_bollinger(df, grid["bb_window"], grid["bb_std"])
-    stoch_best = optimize_stochastic(df, grid["stoch_k"], grid["stoch_d"])
+    sma_cross = optimize_ma_crossover(close, sma, grid["sma_fast"], grid["sma_slow"], interval=interval)
+    sma_trend = optimize_single_ma_trend(close, grid["sma_trend"], interval=interval)
+    ema_cross = optimize_ma_crossover(close, ema, grid["ema_fast"], grid["ema_slow"], interval=interval)
+    rsi_best = optimize_rsi(close, grid["rsi_window"], grid["rsi_thresholds"], interval=interval)
+    macd_best = optimize_macd(close, grid["macd_fast"], grid["macd_slow"], grid["macd_signal"], interval=interval)
+    bb_best = optimize_bollinger(df, grid["bb_window"], grid["bb_std"], interval=interval)
+    stoch_best = optimize_stochastic(df, grid["stoch_k"], grid["stoch_d"], interval=interval)
+
+    # ATR/ADX windows are NOT walk-forward validated the way the 7 families
+    # above are (see walk_forward_validate/build_honest_assessment — neither
+    # covers them), and an autocorrelation-picked window on daily-return noise
+    # is not a reliable per-ticker "optimization". Rather than presenting an
+    # unvalidated window with the same "optimized" framing as the validated
+    # families, use the conventional fixed default (matches
+    # STATIC_DEFAULT_PARAMS) and report the autocorrelation estimate
+    # separately, labeled as informational only.
     cycle_window = estimate_dominant_cycle(close)
 
     params = {
@@ -709,8 +782,8 @@ def optimize_all_parameters(df: pd.DataFrame, grid: dict | None = None) -> dict:
         "bb_std": bb_best["num_std"],
         "stoch_k": stoch_best["k_window"],
         "stoch_d": stoch_best["d_window"],
-        "atr_window": cycle_window,
-        "adx_window": cycle_window,
+        "atr_window": STATIC_DEFAULT_PARAMS["atr_window"],
+        "adx_window": STATIC_DEFAULT_PARAMS["adx_window"],
     }
 
     backtest_scores = {
@@ -721,7 +794,7 @@ def optimize_all_parameters(df: pd.DataFrame, grid: dict | None = None) -> dict:
         "macd_sharpe": round(macd_best["sharpe"], 3),
         "bollinger_sharpe": round(bb_best["sharpe"], 3),
         "stochastic_sharpe": round(stoch_best["sharpe"], 3),
-        "dominant_cycle_length_days": cycle_window,
+        "dominant_cycle_length_days_informational_not_validated": cycle_window,
     }
 
     return {"params": params, "backtest_scores": backtest_scores}
@@ -742,9 +815,19 @@ def get_current_price(ticker: str) -> dict:
     tk = yf.Ticker(ticker)
     info = tk.fast_info  # lightweight, fast quote data
 
+    last_price = getattr(info, "last_price", None)
+    if last_price is None:
+        # fast_info's last_price is sometimes empty (illiquid names, pre/post
+        # market gaps). Fall back to the same tiered lookup get_share_price
+        # uses (live -> intraday snapshot -> previous close) instead of
+        # returning a quote with a silently missing price — get_share_price
+        # raises if every tier fails, so that discipline carries through here
+        # rather than this tool quietly handing back a None.
+        last_price = get_share_price(ticker)
+
     result = {
         "ticker": ticker.upper(),
-        "last_price": getattr(info, "last_price", None),
+        "last_price": last_price,
         "previous_close": getattr(info, "previous_close", None),
         "open": getattr(info, "open", None),
         "day_high": getattr(info, "day_high", None),
@@ -817,7 +900,7 @@ def optimize_indicator_parameters(ticker: str, period: str = "2y", interval: str
                   check on the in-sample numbers above; recommended to leave on.
     """
     df = _fetch_history(ticker, period, interval)
-    optimized = optimize_all_parameters(df)
+    optimized = optimize_all_parameters(df, interval=interval)
 
     result = {
         "ticker": ticker.upper(),
@@ -828,15 +911,21 @@ def optimize_indicator_parameters(ticker: str, period: str = "2y", interval: str
         "in_sample_backtest_scores": optimized["backtest_scores"],
         "note": (
             "'in_sample_backtest_scores' were chosen by backtesting simple long/flat "
-            "strategies for each indicator on this ticker's own price history and "
-            "picking the highest-Sharpe combination. This is in-sample optimization "
-            "(no out-of-sample validation on its own) — treat it as 'what rhythm has "
-            "this stock historically respected', not a guarantee of future performance."
+            "strategies (net of an assumed "
+            f"{DEFAULT_COST_BPS:.0f}bps cost per position change) for each indicator on "
+            "this ticker's own price history and picking the highest-Sharpe combination. "
+            "This is in-sample optimization (no out-of-sample validation on its own) — "
+            "treat it as 'what rhythm has this stock historically respected', not a "
+            "guarantee of future performance. atr_window/adx_window are NOT part of this "
+            "optimization (they use the conventional default, 14) since ATR/ADX don't map "
+            "onto a long/flat backtest the other families do — see "
+            "'dominant_cycle_length_days_informational_not_validated' for an unvalidated "
+            "autocorrelation-based estimate, not used as the actual window."
         ),
     }
 
     if validate:
-        wf_summary = walk_forward_validate(df)
+        wf_summary = walk_forward_validate(df, interval=interval)
         result["walk_forward_out_of_sample_scores"] = wf_summary
         result["honest_assessment"] = build_honest_assessment(optimized["backtest_scores"], wf_summary)
 
@@ -869,7 +958,7 @@ def get_technical_analysis(ticker: str, period: str = "1y", interval: str = "1d"
 
     backtest_scores = None
     if optimize:
-        optimized = optimize_all_parameters(df)
+        optimized = optimize_all_parameters(df, interval=interval)
         params = optimized["params"]
         backtest_scores = optimized["backtest_scores"]
     else:

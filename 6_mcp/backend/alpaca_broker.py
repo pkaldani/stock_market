@@ -269,8 +269,12 @@ def get_realized_pnl() -> dict:
     return result
 
 
-def get_latest_price(symbol: str) -> float:
-    """Midpoint of the latest real bid/ask for a symbol."""
+def get_quote(symbol: str) -> dict:
+    """Latest real bid/ask quote for a symbol, plus the derived midpoint and
+    the spread as a fraction of the midpoint. `get_latest_price` is a thin
+    wrapper around this; accounts.py also uses `spread_pct` directly for a
+    pre-submission wide-spread warning, since market orders can fill well
+    away from the midpoint when the spread is wide (thin liquidity)."""
     request = StockLatestQuoteRequest(symbol_or_symbols=symbol)
     quotes = data_client().get_stock_latest_quote(request)
     if symbol not in quotes:
@@ -278,8 +282,17 @@ def get_latest_price(symbol: str) -> float:
     quote = quotes[symbol]
     bid, ask = quote.bid_price, quote.ask_price
     if bid and ask:
-        return round((bid + ask) / 2, 4)
-    return float(ask or bid)
+        mid = round((bid + ask) / 2, 4)
+        spread_pct = (ask - bid) / mid if mid else None
+    else:
+        mid = float(ask or bid)
+        spread_pct = None  # only one side quoted — nothing to compute a spread from
+    return {"bid": bid, "ask": ask, "mid": mid, "spread_pct": spread_pct}
+
+
+def get_latest_price(symbol: str) -> float:
+    """Midpoint of the latest real bid/ask for a symbol."""
+    return get_quote(symbol)["mid"]
 
 
 def submit_market_order(symbol: str, quantity: int, side: str) -> dict:

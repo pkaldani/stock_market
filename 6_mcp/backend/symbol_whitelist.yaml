@@ -1,24 +1,27 @@
-# Symbols the trading agent may research and buy (see backend/symbol_whitelist.py).
-# Selling an existing holding is always allowed, even if it's not (or no longer)
-# listed here, so a pre-existing position never gets stuck with no way to exit.
+# Symbols the trading agent may research and buy, each tagged with its GICS-ish
+# sector so the decision mandate's sector-concentration check (see
+# Account.sector_exposure in accounts.py) has real data to evaluate against
+# instead of just naming the concept with nothing behind it. Selling an
+# existing holding is always allowed, even if it's not (or no longer) listed
+# here, so a pre-existing position never gets stuck with no way to exit.
 symbols:
-  - AAPL
-  - MSFT
-  - GOOGL
-  - AMZN
-  - AXP
-  - KO
-  - JNJ
-  - PG
-  - V
-  - MA
-  - WMT
-  - JPM
-  - HD
-  - COST
-  - UNH
-  - XOM
-  - CVX
-  - PEP
-  - MCD
-  - DIS
+  AAPL: Information Technology
+  MSFT: Information Technology
+  GOOGL: Communication Services
+  AMZN: Consumer Discretionary
+  AXP: Financials
+  KO: Consumer Staples
+  JNJ: Health Care
+  PG: Consumer Staples
+  V: Financials
+  MA: Financials
+  WMT: Consumer Staples
+  JPM: Financials
+  HD: Consumer Discretionary
+  COST: Consumer Staples
+  UNH: Health Care
+  XOM: Energy
+  CVX: Energy
+  PEP: Consumer Staples
+  MCD: Consumer Discretionary
+  DIS: Communication Services
