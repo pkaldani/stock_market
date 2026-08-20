@@ -45,8 +45,13 @@ async function loadMarket(): Promise<void> {
     const market = await getMarket();
     const badge = document.getElementById("market-badge")!;
     badge.dataset.source = market.source;
+    // backend/api.py's /api/market only ever reports "yfinance" now (market.py
+    // is pure yfinance, no simulated fallback) — this used to check for a
+    // "massive" source from an earlier data-provider design that no longer
+    // exists, so it always fell through to "Simulated" and mislabeled real
+    // live data.
     document.getElementById("market-source")!.textContent =
-      market.source === "massive" ? "Live market" : "Simulated";
+      market.source === "yfinance" ? "Live market" : "Simulated";
     document.getElementById("market-status")!.textContent = market.is_market_open
       ? "Market open"
       : "Market closed";

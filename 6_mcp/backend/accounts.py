@@ -30,6 +30,15 @@ MIN_HOLD_HOURS = float(os.getenv("MIN_HOLD_HOURS", "24"))
 # worst case from a malfunctioning run.
 MAX_ORDERS_PER_24H = int(os.getenv("MAX_ORDERS_PER_24H", "15"))
 
+# Position-sizing limits from the decision mandate (templates.py's Step 4),
+# enforced here rather than left as prompt-only text the model could ignore
+# or miscompute. Expressed as % of total portfolio value (cash + positions).
+# MAX_POSITION_PCT mirrors templates.py's "never exceed [X]%... default to
+# 10% if not specified"; MAX_SECTOR_PCT mirrors its "never exceed 30% of
+# portfolio in a single sector".
+MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "10")) / 100
+MAX_SECTOR_PCT = float(os.getenv("MAX_SECTOR_PCT", "30")) / 100
+
 # Warn (don't block — market-order-only is a deliberate design choice) when
 # the bid/ask spread is wide enough that a market order could fill well away
 # from the quoted midpoint, a sign of thin liquidity.
@@ -176,6 +185,44 @@ class Account(BaseModel):
                 "circuit breaker against a runaway loop, not a normal trading limit."
             )
 
+    def _check_position_limits(self, symbol: str, order_value: float) -> None:
+        """Block a BUY that would push either the single-position or the
+        sector-concentration limit past its cap (MAX_POSITION_PCT /
+        MAX_SECTOR_PCT above) — the code-level enforcement of the decision
+        mandate's Step 4 limits (templates.py), which until now existed only
+        as prompt text: nothing read the agent's final JSON to gate on it,
+        and buy_shares had no check of its own. Sells are never checked here
+        since they only reduce exposure. Skips the check entirely if
+        portfolio_value is 0 (nothing to size a % against yet, e.g. a fresh
+        account)."""
+        portfolio_value = self.calculate_portfolio_value()
+        if portfolio_value <= 0:
+            return
+
+        positions = alpaca_broker.get_real_positions_detail()
+        existing_position_value = next(
+            (p["market_value"] for p in positions if p["symbol"] == symbol), 0.0
+        )
+        position_pct = (existing_position_value + order_value) / portfolio_value
+        if position_pct > MAX_POSITION_PCT:
+            raise ValueError(
+                f"BUY_BLOCKED_BY_LIMITS: this order would put {symbol} at {position_pct:.1%} of "
+                f"portfolio value, exceeding the {MAX_POSITION_PCT:.0%} single-position limit."
+            )
+
+        sector = get_symbol_sector(symbol) or "Unclassified"
+        sector_value = sum(
+            p["market_value"] for p in positions
+            if (get_symbol_sector(p["symbol"]) or "Unclassified") == sector
+        )
+        sector_pct = (sector_value + order_value) / portfolio_value
+        if sector_pct > MAX_SECTOR_PCT:
+            raise ValueError(
+                f"BUY_BLOCKED_BY_LIMITS: this order would put the '{sector}' sector at "
+                f"{sector_pct:.1%} of portfolio value, exceeding the {MAX_SECTOR_PCT:.0%} "
+                f"sector-concentration limit."
+            )
+
     def _append_transaction(self, transaction: Transaction) -> None:
         """Append one transaction via a locked, freshly-read read-modify-write
         cycle (database.account_transaction), then refresh self.transactions
@@ -265,6 +312,7 @@ class Account(BaseModel):
                 f"order may fill well away from the ${price:.2f} midpoint used for sizing."
             )
         estimated_cost = price * quantity
+        self._check_position_limits(symbol, estimated_cost)
 
         account_info = alpaca_broker.get_account_info()
         if estimated_cost > account_info["buying_power"]:
@@ -383,13 +431,22 @@ class Account(BaseModel):
         own closed-trade track record — not just current unrealized P&L on
         still-open positions, which is all report() surfaced before this.
         Use get_realized_pnl() for the full trade-by-trade ledger behind
-        these numbers."""
+        these numbers.
+
+        `incomplete_for_symbols` lists any symbol with a sell quantity that
+        FIFO matching couldn't pair against a known open lot (see
+        alpaca_broker.get_realized_pnl's unmatched_sell_qty_by_symbol) — for
+        those symbols total_realized_pnl/win_rate_pct are understated, not
+        wrong-but-complete, since the unmatched portion is excluded rather
+        than guessed at."""
         data = alpaca_broker.get_realized_pnl()
         closed = data["closed_trades"]
+        incomplete_for_symbols = sorted(data["unmatched_sell_qty_by_symbol"].keys())
         if not closed:
             return {
                 "total_realized_pnl": 0.0, "closed_trade_count": 0, "win_rate_pct": None,
                 "avg_win": None, "avg_loss": None, "best_trade_pnl": None, "worst_trade_pnl": None,
+                "incomplete_for_symbols": incomplete_for_symbols,
             }
         pnls = [t["realized_pnl"] for t in closed]
         wins = [p for p in pnls if p > 0]
@@ -402,26 +459,31 @@ class Account(BaseModel):
             "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
             "best_trade_pnl": round(max(pnls), 2),
             "worst_trade_pnl": round(min(pnls), 2),
+            "incomplete_for_symbols": incomplete_for_symbols,
         }
 
     def sector_exposure(self) -> dict[str, float]:
-        """Current portfolio exposure by sector, as a % of total portfolio
-        market value, computed from live Alpaca position data cross-
-        referenced against each symbol's sector tag in symbol_whitelist.yaml.
-        A held symbol outside the whitelist (e.g. a legacy position) is
-        grouped under 'Unclassified' since there's no sector data for it.
-        This is what backs the decision mandate's sector-concentration
-        check — previously that check named a limit with no real data behind
-        it to evaluate against."""
-        positions = alpaca_broker.get_real_positions_detail()
-        total_value = sum(p["market_value"] for p in positions)
-        if total_value <= 0:
+        """Current portfolio exposure by sector, as a % of TOTAL portfolio
+        value — cash + positions, calculate_portfolio_value()'s definition,
+        the same denominator _check_position_limits uses to enforce
+        MAX_SECTOR_PCT. (Previously this divided by invested capital only —
+        sum of position market values — so sectors always summed to 100%
+        regardless of cash on hand, silently inflating every reported %
+        versus what the enforcement check and everyone else in this codebase
+        means by "portfolio value".) Computed from live Alpaca position data
+        cross-referenced against each symbol's sector tag in
+        symbol_whitelist.yaml; a held symbol outside the whitelist (e.g. a
+        legacy position) is grouped under 'Unclassified'. Percentages here
+        no longer sum to 100% — the remainder is uninvested cash."""
+        portfolio_value = self.calculate_portfolio_value()
+        if portfolio_value <= 0:
             return {}
+        positions = alpaca_broker.get_real_positions_detail()
         by_sector: dict[str, float] = {}
         for p in positions:
             sector = get_symbol_sector(p["symbol"]) or "Unclassified"
             by_sector[sector] = by_sector.get(sector, 0.0) + p["market_value"]
-        return {sector: round(100 * value / total_value, 1) for sector, value in by_sector.items()}
+        return {sector: round(100 * value / portfolio_value, 1) for sector, value in by_sector.items()}
 
     def get_holdings(self):
         return self.holdings
@@ -431,6 +493,18 @@ class Account(BaseModel):
 
     def report(self) -> str:
         """ Return a json string representing the account.  """
+        # reconcile_pending_transactions() otherwise only runs as a side
+        # effect of the NEXT buy_shares/sell_shares call — a symbol with no
+        # further trading activity could stay stuck showing a stale
+        # provisional quantity/price/order_status indefinitely even after
+        # the real order resolved. report() is called at the start of every
+        # scheduled trader run (Trader.get_account_report(), regardless of
+        # whether that run ends up trading anything) and after every
+        # buy/sell, so hooking it here gives reconciliation a proactive
+        # trigger instead of purely an incidental one. Cheap when nothing is
+        # pending — reconcile_pending_transactions() early-returns without
+        # any Alpaca calls in that (overwhelmingly common) case.
+        self.reconcile_pending_transactions()
         portfolio_value = self.calculate_portfolio_value()
         self._append_portfolio_value_point((datetime.now().strftime("%Y-%m-%d %H:%M:%S"), portfolio_value))
         pnl = self.calculate_profit_loss()

@@ -54,7 +54,19 @@ backend Service). `scripts/deploy-kind.sh` builds all three, loads them into a l
 flags (`--tag`, `--skip-build`, `--skip-secret`, `--dry-run`, etc.); it also creates/updates the k8s
 Secret from `.env` (only non-empty keys, since an empty-but-present env var breaks the OpenAI SDK's
 `OPENAI_API_KEY` fallback — see the script's comment) and force-restarts the app/frontend Deployments
-after a `--pullPolicy Never` reload so already-running pods pick up freshly loaded image content.
+after a `--pullPolicy Never` reload so already-running pods pick up freshly loaded image content. The
+base image stage sets `PYTHONUNBUFFERED=1` — without it, Python fully block-buffers stdout when it isn't
+a TTY (true for every container here), so the engine's own `print()`-based scheduler-loop logs could sit
+invisible for a very long time instead of reaching `kubectl logs -f deploy/trading-floor-app -c engine`,
+the exact workflow the chart's own `NOTES.txt` documents for watching it (confirmed live: before this
+fix, a freshly-started engine pod showed zero loop output for minutes despite the loop visibly having
+already run at least once).
+
+The non-secret scheduler knobs (`RUN_EVERY_N_MINUTES`, `RUN_EVEN_WHEN_MARKET_IS_CLOSED`) are **not**
+sourced from `.env` in this deployment path at all — they come from the chart's own
+`values.yaml`/configmap (currently `1440`/`false`, its own separate defaults from whatever `.env` has set
+for local dev runs). This is intentional config-source separation, not a bug: `deploy-kind.sh`'s
+`SECRET_KEYS` list only pulls actual secrets from `.env`.
 
 ## Environment variables
 
@@ -72,7 +84,12 @@ markets are closed), `MIN_HOLD_HOURS` (default `24` — minimum time between tra
 symbol, in either direction, enforced in `Account.buy_shares`/`sell_shares`; this is the code-level
 day-trading guardrail, on top of the scheduler interval), `MAX_ORDERS_PER_24H` (default `15` — a
 circuit breaker on total orders, buy+sell across *all* symbols, in a rolling 24h window; unlike
-`MIN_HOLD_HOURS` this guards against a runaway loop hitting many different symbols, not re-trading one).
+`MIN_HOLD_HOURS` this guards against a runaway loop hitting many different symbols, not re-trading one),
+`MAX_POSITION_PCT` (default `10` — max % of portfolio value a single symbol may reach after a BUY) and
+`MAX_SECTOR_PCT` (default `30` — same, per sector), both enforced in `Account._check_position_limits`
+(called from `buy_shares` only; sells are never blocked) — the code-level enforcement of the position-
+sizing limits `templates.trader_instructions()` states in prose, which previously had no code backing
+them at all.
 
 ## Architecture
 
@@ -119,14 +136,32 @@ this is why the account context passed into every run now includes `sector_expos
 `sector_exposure_after_trade_pct` is part of the output JSON. The account context also includes
 `realized_pnl_summary` (win rate, avg win/loss, best/worst trade from closed positions — see the Money
 section) so the trader's strategy evolution is informed by its actual track record, not just unrealized
-P&L on what it's still holding.
+P&L on what it's still holding. Step 4's conviction tiers are written to partition the ≥30% margin-of-
+safety range Step 2 already requires for a BUY (High: wide moat AND >40%; Medium: narrow moat, OR the
+30-40% band) — they used to describe a "Medium: 20-30%" tier that Step 2's own BUY gate made unreachable,
+leaving 30-40% undefined.
 
-The Researcher's instructions (`researcher_instructions()` in `templates.py`) also cover: batching a
-lightweight first pass across multiple candidates before deep-diving any one of them when asked to
-screen/compare tickers; explicitly separating company-specific weakness from sector/macro-wide moves;
-knowledge-graph recall discipline (state how old a recalled fact is, re-verify anything older than ~90
-days rather than repeating it as current); and citing a source URL + date for any finding material
-enough to move a decision.
+The Researcher's instructions (`researcher_instructions()` in `templates.py`) also cover: an "Approved
+symbol universe" section (the same whitelist+sector list `trader_instructions()` shows, imported from
+`symbol_whitelist.py`) scoping NEW-candidate research to tickers `buy_shares` can actually act on —
+existing/legacy holdings are exempt since those need evaluating for SELL/HOLD regardless of whitelist
+status; batching a lightweight first pass across multiple candidates before deep-diving any one of them
+when asked to screen/compare tickers; explicitly separating company-specific weakness from sector/macro-
+wide moves; and citing a source URL + date for any finding material enough to move a decision.
+Knowledge-graph
+recall discipline (re-verify anything older than ~90 days) is enforced through a storage convention, not
+tool metadata: the `mcp-memory-libsql` server wired in `mcp_servers.py` never returns a stored fact's
+timestamp on `search_nodes`/`read_graph` recall, so the instructions require writing an explicit
+`[as of YYYY-MM-DD]` tag into every observation's own text at write time — an untagged recalled fact has
+no knowable age and must be treated as such, not assumed recent. Separately, `get_technical_analysis`/
+`get_full_report` (the researcher's default technical-analysis tools) surface indicator signals chosen
+from **unvalidated** in-sample backtest parameters — unlike `optimize_indicator_parameters`, they skip
+`walk_forward_validate`/`build_honest_assessment` to stay cheap enough for a screening pass across many
+candidates. Their output is labeled `in_sample_backtest_scores_unvalidated` (not the bare
+`backtest_scores` key `optimize_indicator_parameters` itself avoids using for its in-sample numbers) plus
+a `backtest_scores_caveat` string, and the researcher instructions point the model at
+`optimize_indicator_parameters(validate=True)` before treating a signal from the default tools as more
+than a rough heuristic.
 
 ### Money: one real account, no virtual ledger (`backend/accounts.py`, `backend/alpaca_broker.py`)
 Alpaca's Trading API has no concept of sub-accounts, so `Account` (a pydantic model, always keyed by the
@@ -150,12 +185,23 @@ the symbol isn't in `backend/symbol_whitelist.yaml` (loaded/cached by `backend/s
 positions in, also surfaced in `templates.trader_instructions()` (with each symbol's sector) so the
 agent doesn't waste Researcher turns on tickers it can't buy, or ignore sector-concentration limits it
 can't evaluate. This restriction is buys-only: `sell_shares` has no such check, so an existing holding
-outside the list (e.g. a legacy position from before the whitelist existed) can always be exited. Both
-methods also fetch a real bid/ask quote (`alpaca_broker.get_quote`) and log a warning (never block) if
-the spread exceeds `WIDE_SPREAD_PCT_THRESHOLD` (2%) — a signal the market order may fill well away from
-the quoted midpoint — and check `is_market_open()` to log (not block) that an order placed while closed
-will queue for the next session's open rather than fill at the quote used for sizing. See
-`backend/setup_guide.md` for the full writeup of the Alpaca integration and its sharp edges.
+outside the list (e.g. a legacy position from before the whitelist existed) can always be exited.
+`buy_shares` also runs `_check_position_limits` (once the pre-trade quote gives it an order value) — this
+one *does* block, unlike the spread/market-hours checks below — raising `BUY_BLOCKED_BY_LIMITS` if the
+order would push the symbol's position value past `MAX_POSITION_PCT` or its sector's total value past
+`MAX_SECTOR_PCT` of portfolio value (see Environment variables). This is the code-level enforcement of
+the position-sizing limits `trader_instructions()` states in prose; before this check existed nothing
+enforced them — the agent's final JSON verdict (including a `BUY_BLOCKED_BY_LIMITS` decision field) was
+never parsed by any caller, so a model ignoring or miscomputing its own stated limit had nothing stopping
+the order from actually going through. Both methods also fetch a real bid/ask quote
+(`alpaca_broker.get_quote`) and log a warning (never block) if the spread exceeds
+`WIDE_SPREAD_PCT_THRESHOLD` (2%) — a signal the market order may fill well away from the quoted midpoint
+— and check `alpaca_broker.is_market_open()` to log (not block) that an order placed while closed will
+queue for the next session's open rather than fill at the quote used for sizing; `trading_floor.py`'s
+scheduler loop uses the same Alpaca-backed check (via its own `_is_market_open()` wrapper) to decide
+whether to run at all, wrapped so a transient API failure can't crash the loop — it used to call
+`market.py`'s separate yfinance-based `is_market_open()` for this with no exception handling at all.
+See `backend/setup_guide.md` for the full writeup of the Alpaca integration and its sharp edges.
 
 **Fill polling and reconciliation.** After submitting an order, `_poll_for_fill` polls Alpaca a few
 times (`_FILL_POLL_ATTEMPTS` × `_FILL_POLL_DELAY_SECONDS`) for a terminal status before giving up. If
@@ -164,7 +210,18 @@ the pre-trade quote) with its real `order_status`; `reconcile_pending_transactio
 of every future `buy_shares`/`sell_shares` — sweeps any non-terminal-status transaction, re-checks it
 against Alpaca, and patches in the real filled quantity/price once the order resolves. This means a
 transaction's `quantity`/`price` can legitimately change after being recorded; don't assume the value
-written at order-submission time is final.
+written at order-submission time is final. The frontend now carries `order_status` on every `Transaction`
+(`frontend/src/api.ts`'s `isPendingOrder`, mirroring `_TERMINAL_ORDER_STATUSES`) and marks a still-pending
+row (italicized, "(pending)" suffix) in both `transactions.ts` and `trade.ts`'s order history, since a
+provisional row can otherwise sit on screen indefinitely — reconciliation only runs as a side effect of
+the *next* buy/sell call on any symbol, not on a timer. `report()` also calls
+`reconcile_pending_transactions()` itself now, at the top — confirmed live against a real stuck
+transaction during kind-cluster testing (a manual SNDK buy sat at `order_status: "accepted"` with a stale
+pre-fill price for over a day because no later buy/sell had happened to trigger reconciliation)
+`report()` is what `Trader.get_account_report()` calls at the start of *every* scheduled run, trade or
+rebalance, whether or not that run ends up placing an order — so this gives reconciliation a proactive
+trigger instead of a purely incidental one. Cheap in the overwhelmingly common case: with nothing
+pending, `reconcile_pending_transactions()` early-returns without any Alpaca calls at all.
 
 **Concurrency.** Because both the trading-floor engine (the LLM trader) and `api.py`'s manual-trade
 endpoints can write the same account row, `database.account_transaction()` wraps every
@@ -177,11 +234,19 @@ pattern — it's exactly the race this replaced.
 ledger, via `alpaca_broker.get_realized_pnl()`) and `Account.realized_pnl_summary()` (compact win-rate/
 avg-win/avg-loss/best/worst rollup) are both folded into `report()`'s output automatically, so every
 trade/rebalance run's account context — and `/api/trader`'s `realized_pnl_summary` field — carries the
-trader's actual closed-trade track record, not just unrealized P&L on open positions.
-`Account.sector_exposure()` computes current % of portfolio value per sector from live Alpaca position
-data cross-referenced against `symbol_whitelist.yaml`'s sector tags (a held symbol outside the whitelist
-groups under `"Unclassified"`); this backs the decision mandate's sector-concentration limit with real
-data instead of an unevaluated named limit.
+trader's actual closed-trade track record, not just unrealized P&L on open positions. A sell quantity
+FIFO matching can't pair against a known open lot (a split, or a position opened before Alpaca's
+earliest reported fill) is excluded from the totals rather than guessed at, and now surfaced via
+`unmatched_sell_qty_by_symbol` (`alpaca_broker.get_realized_pnl`) /
+`incomplete_for_symbols` (`Account.realized_pnl_summary`, also typed on the frontend's
+`RealizedPnlSummary`) so a caller can tell those totals are understated for that symbol rather than
+silently trusting them. `Account.sector_exposure()` computes current % of **total portfolio value**
+(cash + positions — `calculate_portfolio_value()`'s definition, the same denominator
+`_check_position_limits` enforces against) per sector from live Alpaca position data cross-referenced
+against `symbol_whitelist.yaml`'s sector tags (a held symbol outside the whitelist groups under
+`"Unclassified"`); it used to divide by invested capital only (so sectors always summed to 100%
+regardless of cash on hand), inflating every reported % versus what "portfolio value" means everywhere
+else — percentages here no longer sum to 100%, the remainder is uninvested cash.
 
 Every account/MCP tool (`get_balance`, `buy_shares`, `get_realized_pnl`, `change_strategy`, the
 `accounts://...` resources, `accounts_client.py`) takes **no name argument** — `Account.get()` always
@@ -194,16 +259,24 @@ site.
 see the Money section above) and its own MCP server
 (`mcp = FastMCP("stock-analysis")`, run via `market_analysis_params` in `mcp_servers.py`) exposing
 `get_current_price`, `get_historical_data`, `optimize_indicator_parameters`, `get_technical_analysis`,
-and `get_full_report` to the researcher sub-agent. Price lookups are tiered (live last price -> 1m
-intraday snapshot -> previous close, via yfinance) with no simulated fallback — it raises rather than
-fabricating a price. `market_simulator.py` (deterministic pseudo-random prices from a ticker+timestamp
-seed) and `backend/stock_mcp_server.py` (an earlier, near-duplicate of `market.py` without the
-price/is_market_open tools) both exist in the tree but nothing currently imports or runs them — treat
-`market.py` as the live implementation before assuming either of those is in the loop.
+and `get_full_report` to the researcher sub-agent. Price lookups (`get_share_price`) are tiered (live
+last price -> 1m intraday snapshot -> previous close, via yfinance) with no simulated fallback — it
+raises rather than fabricating a price; the tier remembered as "last one that worked" is tracked
+per-symbol (`_plan_tier_by_symbol`), not globally, so one illiquid ticker falling back to previous-close
+can't leave an unrelated ticker's next lookup starting from that same stale tier. `market_simulator.py`
+(deterministic pseudo-random prices from a ticker+timestamp seed) and `backend/stock_mcp_server.py` (an
+earlier, near-duplicate of `market.py` without the price/is_market_open tools) both exist in the tree but
+nothing currently imports or runs them — treat `market.py` as the live implementation before assuming
+either of those is in the loop.
 
-Known inconsistency: `api.py`'s `/api/market` endpoint reads `market.massive_api_key`, an attribute
-`market.py` no longer defines (it's pure-yfinance now) — that endpoint will raise `AttributeError` as
-the code currently stands.
+`api.py`'s `/api/market` endpoint hardcodes `source: "yfinance"` (it used to read `market.massive_api_key`,
+an attribute from an earlier data-source design `market.py` no longer defines, so the endpoint 500'd on
+every call — `market.py` is pure yfinance now, so "yfinance" is simply always correct, not a placeholder).
+The frontend's `main.ts`/`api.ts` `MarketInfo.source` type and market-status-badge label logic (and the
+matching `[data-source="..."]` CSS in `styles.css`) were fixed to match — they used to check for a
+`"massive"` source value the backend has never sent since the source rename above, so the sidebar badge
+silently mislabeled real live data as "Simulated" (dormant until the `/api/market` 500 above was fixed,
+since the endpoint had been crashing outright before that).
 
 ### HTTP API (`backend/api.py`) and frontend (`frontend/src/`)
 Most of `api.py` is read-only (it reads `accounts.db` and live Alpaca/price data, the trading floor

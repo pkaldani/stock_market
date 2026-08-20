@@ -129,7 +129,7 @@ body {
   background: var(--fg-muted);
 }
 .market-badge[data-source="simulator"] .market-dot { background: var(--blue); }
-.market-badge[data-source="massive"] .market-dot { background: var(--trend-up); }
+.market-badge[data-source="yfinance"] .market-dot { background: var(--trend-up); }
 
 .market-status {
   font-size: 11px;
@@ -498,6 +498,14 @@ body {
   color: var(--fg-muted);
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* Order hasn't reached a terminal status yet — quantity/price are the
+   pre-fill estimate, not confirmed. Reconciled automatically on a later
+   buy/sell call (see accounts.py's reconcile_pending_transactions). */
+.txn-row[data-pending="true"] .txn-detail,
+.history-row[data-pending="true"] .txn-detail {
+  font-style: italic;
+  color: var(--fg-dim);
 }
 
 /* ---- Trade page ---- */

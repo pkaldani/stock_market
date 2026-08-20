@@ -12,9 +12,15 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS base
 
 WORKDIR /app
+# PYTHONUNBUFFERED: without it, Python fully block-buffers stdout when it isn't
+# a TTY (true for every container here) — the engine's own print()s in
+# trading_floor.py's scheduler loop can then sit invisible for a very long
+# time instead of reaching `kubectl logs`, the exact workflow the Helm
+# chart's own NOTES.txt tells you to use to watch it.
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    PATH="/app/.venv/bin:${PATH}"
+    PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
 
 # Dependency layer first so it's cached independently of app source changes.
 COPY pyproject.toml uv.lock ./

@@ -4,7 +4,7 @@
 // source="manual" server-side) — every submit is a two-step confirm, not a
 // single click, since it's a real (if paper) financial transaction.
 
-import { buyShares, getPrice, getRealizedPnl, getTrader, sellShares } from "./api";
+import { buyShares, getPrice, getRealizedPnl, getTrader, isPendingOrder, sellShares } from "./api";
 import type { ClosedTrade, Holding, RealizedPnl, TraderDetail, Transaction } from "./api";
 
 function formatMoney(n: number): string {
@@ -241,12 +241,16 @@ export class TradePage {
     for (const t of transactions.slice(-25).reverse()) {
       const row = document.createElement("div");
       row.className = "history-row";
-      if (t.rationale) row.title = t.rationale;
+      const pending = isPendingOrder(t);
+      row.dataset.pending = String(pending);
+      row.title = [t.rationale, pending ? `order still ${t.order_status} — quantity/price shown are provisional` : ""]
+        .filter(Boolean)
+        .join(" — ");
       const side = t.quantity >= 0 ? "buy" : "sell";
       row.innerHTML = `
         <span class="txn-date">${dateOf(t.timestamp)}</span>
         <span class="txn-side" data-side="${side}">${side.toUpperCase()}</span>
-        <span class="txn-detail">${Math.abs(t.quantity)} ${t.symbol} @ ${formatMoney(t.price)}</span>
+        <span class="txn-detail">${Math.abs(t.quantity)} ${t.symbol} @ ${formatMoney(t.price)}${pending ? " (pending)" : ""}</span>
         <span class="txn-source" data-source="${t.source}">${t.source}</span>
       `;
       host.append(row);

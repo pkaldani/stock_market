@@ -70,8 +70,10 @@ def holdings_detail(positions: list[dict]) -> list[dict]:
 @app.get("/api/market")
 def get_market() -> dict:
     """Which price source is live, and whether the market is open."""
-    source = "massive" if market.massive_api_key else "simulator"
-    return {"source": source, "is_market_open": market.is_market_open()}
+    # market.py is pure yfinance now — this used to read market.massive_api_key,
+    # an attribute from an earlier data-source design that market.py no longer
+    # defines, so this endpoint 500'd on every call.
+    return {"source": "yfinance", "is_market_open": market.is_market_open()}
 
 
 @app.get("/api/trader")

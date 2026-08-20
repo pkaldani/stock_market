@@ -217,9 +217,15 @@ def get_realized_pnl() -> dict:
     oldest open lot(s) first. Returns individual closed trades (for a
     trade-by-trade ledger) plus per-symbol and total rollups.
 
-    A sell that has no matching open lot (e.g. a short, or a position opened
-    before the earliest fill Alpaca reports) has no cost basis to compute
-    against and is left out rather than guessed at.
+    A sell quantity left over after every open lot for that symbol is
+    exhausted (e.g. a short, a position opened before the earliest fill
+    Alpaca reports, or a corporate action like a split changing share counts
+    Alpaca's raw fill history doesn't reconcile) has no cost basis to compute
+    against — that leftover quantity is excluded from closed_trades/by_symbol/
+    total rather than guessed at, and surfaced instead in
+    `unmatched_sell_qty_by_symbol` so a caller can tell the totals are
+    incomplete for that symbol rather than silently trusting an understated
+    number.
     """
     now = time.monotonic()
     cached = _realized_pnl_cache.get("data")
@@ -229,6 +235,7 @@ def get_realized_pnl() -> dict:
 
     open_lots: dict[str, list[list]] = {}  # symbol -> [[qty, price, time], ...], oldest first
     closed_trades: list[dict] = []
+    unmatched_sell_qty: dict[str, float] = {}
     for fill in get_fill_activities():
         symbol, side, qty, price = fill["symbol"], fill["side"], fill["qty"], fill["price"]
         lots = open_lots.setdefault(symbol, [])
@@ -254,6 +261,8 @@ def get_realized_pnl() -> dict:
                 lots.pop(0)
             else:
                 lots[0][0] = lot_qty - matched
+        if remaining > 1e-9:
+            unmatched_sell_qty[symbol] = unmatched_sell_qty.get(symbol, 0.0) + remaining
 
     by_symbol: dict[str, float] = {}
     for trade in closed_trades:
@@ -263,6 +272,7 @@ def get_realized_pnl() -> dict:
         "closed_trades": closed_trades,
         "by_symbol": by_symbol,
         "total": sum(by_symbol.values()),
+        "unmatched_sell_qty_by_symbol": unmatched_sell_qty,
     }
     _realized_pnl_cache["data"] = result
     _realized_pnl_cache["at"] = now

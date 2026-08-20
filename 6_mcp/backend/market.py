@@ -110,10 +110,12 @@ def _previous_close(ticker_obj: yf.Ticker) -> float:
 
 # Best (most live) price first, prior close last. Some tickers/exchanges
 # don't populate the live fields, so we remember the first tier that worked
-# for the current process and start there next time instead of retrying
-# tiers that just failed.
+# for EACH symbol and start there next time instead of retrying tiers that
+# just failed for it — keyed per-symbol (not a single shared tier) so one
+# illiquid ticker falling back to previous-close doesn't leave every other,
+# unrelated ticker's lookup starting from that same stale tier.
 price_methods = [_last_trade, _snapshot, _previous_close]
-plan_tier = 0
+_plan_tier_by_symbol: dict[str, int] = {}
 
 
 @mcp.tool()
@@ -128,13 +130,13 @@ def get_share_price(symbol: str) -> float:
     Args:
         symbol: Stock symbol, e.g. "AAPL".
     """
-    global plan_tier
     ticker_obj = yf.Ticker(symbol)
+    start_tier = _plan_tier_by_symbol.get(symbol, 0)
     last_err: Exception | None = None
-    for tier in range(plan_tier, len(price_methods)):
+    for tier in range(start_tier, len(price_methods)):
         try:
             price = price_methods[tier](ticker_obj)
-            plan_tier = tier
+            _plan_tier_by_symbol[symbol] = tier
             return price
         except Exception as e:
             last_err = e
@@ -983,7 +985,22 @@ def get_technical_analysis(ticker: str, period: str = "1y", interval: str = "1d"
         "signals": summarize_signals_dynamic(latest, params),
     }
     if backtest_scores is not None:
-        result["backtest_scores"] = backtest_scores
+        # Same in-sample-only numbers optimize_indicator_parameters() computes,
+        # but WITHOUT that tool's walk_forward_validate/build_honest_assessment
+        # step — this path skips it to stay cheap enough to call on every
+        # candidate in a screening pass. Named and captioned so it can't be
+        # mistaken for a validated signal: "signals" above is chosen using
+        # these same unvalidated parameters, so a curve-fit window can still
+        # look like an ordinary, trustworthy overbought/oversold read.
+        result["in_sample_backtest_scores_unvalidated"] = backtest_scores
+        result["backtest_scores_caveat"] = (
+            "These are in-sample optimization scores only (no out-of-sample check) — the same "
+            "caveat optimize_indicator_parameters() gives its own in_sample_backtest_scores. "
+            "'signals' above uses these same parameters, so a curve-fit setting can present as an "
+            "ordinary signal. Call optimize_indicator_parameters(validate=True) on this ticker for "
+            "the walk-forward-validated, overfit-flagged version before treating a signal here as "
+            "more than a rough heuristic."
+        )
 
     if include_series:
         result["series"] = _df_to_records(indicators_df)
@@ -1019,8 +1036,9 @@ def get_full_report(ticker: str, period: str = "1y", interval: str = "1d", optim
         "indicators": ta["latest_indicator_values"],
         "signals": ta["signals"],
     }
-    if "backtest_scores" in ta:
-        result["backtest_scores"] = ta["backtest_scores"]
+    if "in_sample_backtest_scores_unvalidated" in ta:
+        result["in_sample_backtest_scores_unvalidated"] = ta["in_sample_backtest_scores_unvalidated"]
+        result["backtest_scores_caveat"] = ta["backtest_scores_caveat"]
     return result
 
 

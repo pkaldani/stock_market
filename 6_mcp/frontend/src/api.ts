@@ -28,6 +28,26 @@ export interface Transaction {
   rationale: string;
   // "agent" (the LLM trader) or "manual" (placed via the trade page).
   source: "agent" | "manual";
+  // Alpaca order status at the time this row was last written. A non-
+  // terminal status (see isPendingOrder below) means quantity/price are
+  // still the pre-fill estimate recorded by buy_shares/sell_shares — the
+  // real values land once a later order reconciles it
+  // (accounts.py's reconcile_pending_transactions), which only runs as a
+  // side effect of the NEXT buy/sell call on any symbol, so a pending row
+  // can persist on screen for a while with no trade activity to trigger it.
+  order_status: string;
+}
+
+// Mirrors accounts.py's _TERMINAL_ORDER_STATUSES. Anything else (new,
+// accepted, pending_new, partially_filled, ...) hasn't resolved yet, so the
+// transaction's quantity/price shown for it is still provisional.
+const TERMINAL_ORDER_STATUSES = new Set([
+  "filled", "canceled", "expired", "rejected", "done_for_day",
+  "replaced", "stopped", "suspended", "calculated",
+]);
+
+export function isPendingOrder(t: Transaction): boolean {
+  return !!t.order_status && !TERMINAL_ORDER_STATUSES.has(t.order_status);
 }
 
 // Compact realized-P&L/win-rate summary — see Account.realized_pnl_summary
@@ -41,6 +61,11 @@ export interface RealizedPnlSummary {
   avg_loss: number | null;
   best_trade_pnl: number | null;
   worst_trade_pnl: number | null;
+  // Symbols where FIFO matching had a sell quantity it couldn't pair against
+  // a known open lot (e.g. a split, or a position opened before Alpaca's
+  // earliest reported fill) — the numbers above are understated, not wrong-
+  // but-complete, for any symbol listed here.
+  incomplete_for_symbols: string[];
 }
 
 export interface TimePoint {
@@ -90,7 +115,10 @@ export interface LogRow {
 }
 
 export interface MarketInfo {
-  source: "massive" | "simulator";
+  // backend/api.py's /api/market always reports "yfinance" (market.py is
+  // pure yfinance, no simulated fallback); "simulator" is kept here only in
+  // case a future data-source change actually introduces one.
+  source: "yfinance" | "simulator";
   is_market_open: boolean;
 }
 
