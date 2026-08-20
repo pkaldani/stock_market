@@ -146,10 +146,15 @@ symbol universe" section (the same whitelist+sector list `trader_instructions()`
 `symbol_whitelist.py`) scoping NEW-candidate research to tickers `buy_shares` can actually act on —
 existing/legacy holdings are exempt since those need evaluating for SELL/HOLD regardless of whitelist
 status; batching a lightweight first pass across multiple candidates before deep-diving any one of them
-when asked to screen/compare tickers; explicitly separating company-specific weakness from sector/macro-
-wide moves; and citing a source URL + date for any finding material enough to move a decision.
-Knowledge-graph
-recall discipline (re-verify anything older than ~90 days) is enforced through a storage convention, not
+when asked to screen/compare tickers; a "Macro, sector, and geopolitical context" standing check —
+separating company-specific weakness from sector/macro-wide moves, and now also political/regulatory/
+geopolitical factors (tariffs, sanctions, trade policy) by inferred geographic exposure, since neither
+`get_asset_info` nor anything else in this codebase exposes a company's headquarters/country — the
+Researcher has to infer exposure from what it already knows about the business and say explicitly when it
+can't; a "Recent major corporate events" standing search (M&A, leadership changes, litigation, guidance
+revisions, restructuring, ~last 90 days) that requires an explicit "found nothing" statement rather than
+silently skipping it; and citing a source URL + date for any finding material enough to move a decision.
+Knowledge-graph recall discipline (re-verify anything older than ~90 days) is enforced through a storage convention, not
 tool metadata: the `mcp-memory-libsql` server wired in `mcp_servers.py` never returns a stored fact's
 timestamp on `search_nodes`/`read_graph` recall, so the instructions require writing an explicit
 `[as of YYYY-MM-DD]` tag into every observation's own text at write time — an untagged recalled fact has
